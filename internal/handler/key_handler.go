@@ -5,6 +5,7 @@ import (
 	app_errors "gpt-load/internal/errors"
 	"gpt-load/internal/models"
 	"gpt-load/internal/response"
+	"gpt-load/internal/services"
 	"io"
 	"log"
 	"path/filepath"
@@ -17,6 +18,31 @@ import (
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
+
+func (s *Server) handleKeyError(c *gin.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if svcErr, ok := err.(*services.I18nError); ok {
+		if svcErr == nil {
+			return false
+		}
+		if svcErr.Template != nil {
+			response.ErrorI18nFromAPIError(c, svcErr.APIError, svcErr.MessageID, svcErr.Template)
+		} else {
+			response.ErrorI18nFromAPIError(c, svcErr.APIError, svcErr.MessageID)
+		}
+		return true
+	}
+
+	if apiErr, ok := err.(*app_errors.APIError); ok {
+		response.Error(c, apiErr)
+		return true
+	}
+
+	return false
+}
 
 // validateGroupIDFromQuery validates and parses group ID from a query parameter.
 // Returns 0 and false if validation fails (error is already sent to client)
@@ -67,6 +93,12 @@ type KeyTextRequest struct {
 	KeysText string `json:"keys_text" binding:"required"`
 }
 
+type AddKeysRequest struct {
+	GroupID  uint   `json:"group_id" binding:"required"`
+	KeysText string `json:"keys_text" binding:"required"`
+	Priority int    `json:"priority"`
+}
+
 // GroupIDRequest defines a generic payload for operations requiring only a group ID.
 type GroupIDRequest struct {
 	GroupID uint `json:"group_id" binding:"required"`
@@ -80,7 +112,7 @@ type ValidateGroupKeysRequest struct {
 
 // AddMultipleKeys handles creating new keys from a text block within a specific group.
 func (s *Server) AddMultipleKeys(c *gin.Context) {
-	var req KeyTextRequest
+	var req AddKeysRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, app_errors.NewAPIError(app_errors.ErrInvalidJSON, err.Error()))
 		return
@@ -94,7 +126,12 @@ func (s *Server) AddMultipleKeys(c *gin.Context) {
 		return
 	}
 
-	result, err := s.KeyService.AddMultipleKeys(req.GroupID, req.KeysText)
+	if req.Priority < 0 {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, "priority must be greater than 0"))
+		return
+	}
+
+	result, err := s.KeyService.AddMultipleKeys(req.GroupID, req.KeysText, req.Priority)
 	if err != nil {
 		if strings.Contains(err.Error(), "batch size exceeds the limit") {
 			response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, err.Error()))
@@ -113,6 +150,7 @@ func (s *Server) AddMultipleKeys(c *gin.Context) {
 func (s *Server) AddMultipleKeysAsync(c *gin.Context) {
 	var groupID uint
 	var keysText string
+	priority := models.DefaultAPIKeyPriority
 
 	// Check content type to determine if it's a file upload or JSON request
 	contentType := c.ContentType()
@@ -131,6 +169,15 @@ func (s *Server) AddMultipleKeysAsync(c *gin.Context) {
 			return
 		}
 		groupID = uint(groupIDInt)
+
+		if priorityStr := strings.TrimSpace(c.PostForm("priority")); priorityStr != "" {
+			priorityInt, err := strconv.Atoi(priorityStr)
+			if err != nil || priorityInt <= 0 {
+				response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, "priority must be greater than 0"))
+				return
+			}
+			priority = priorityInt
+		}
 
 		// Get uploaded file
 		file, err := c.FormFile("file")
@@ -163,13 +210,20 @@ func (s *Server) AddMultipleKeysAsync(c *gin.Context) {
 		keysText = string(buf)
 	} else {
 		// Handle JSON request (original behavior)
-		var req KeyTextRequest
+		var req AddKeysRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.Error(c, app_errors.NewAPIError(app_errors.ErrInvalidJSON, err.Error()))
 			return
 		}
 		groupID = req.GroupID
 		keysText = req.KeysText
+		if req.Priority < 0 {
+			response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, "priority must be greater than 0"))
+			return
+		}
+		if req.Priority > 0 {
+			priority = req.Priority
+		}
 	}
 
 	group, ok := s.findGroupByID(c, groupID)
@@ -181,7 +235,7 @@ func (s *Server) AddMultipleKeysAsync(c *gin.Context) {
 		return
 	}
 
-	taskStatus, err := s.KeyImportService.StartImportTask(group, keysText)
+	taskStatus, err := s.KeyImportService.StartImportTaskWithPriority(group, keysText, priority)
 	if err != nil {
 		response.Error(c, app_errors.NewAPIError(app_errors.ErrTaskInProgress, err.Error()))
 		return
@@ -224,6 +278,9 @@ func (s *Server) ListKeysInGroup(c *gin.Context) {
 
 	// Decrypt all keys for display
 	for i := range keys {
+		if keys[i].Priority <= 0 {
+			keys[i].Priority = models.DefaultAPIKeyPriority
+		}
 		decryptedValue, err := s.EncryptionSvc.Decrypt(keys[i].KeyValue)
 		if err != nil {
 			logrus.WithError(err).WithField("key_id", keys[i].ID).Error("Failed to decrypt key value for listing")
@@ -503,6 +560,17 @@ type UpdateKeyNotesRequest struct {
 	Notes string `json:"notes"`
 }
 
+type UpdateKeyPriorityRequest struct {
+	Priority int `json:"priority" binding:"required"`
+}
+
+type UpdateKeyRequest struct {
+	Notes               *string        `json:"notes"`
+	Priority            *int           `json:"priority"`
+	Config              map[string]any `json:"config"`
+	ProbeParamOverrides map[string]any `json:"probe_param_overrides"`
+}
+
 // UpdateKeyNotes handles updating the notes of a specific API key.
 func (s *Server) UpdateKeyNotes(c *gin.Context) {
 	keyIDStr := c.Param("id")
@@ -543,4 +611,80 @@ func (s *Server) UpdateKeyNotes(c *gin.Context) {
 	}
 
 	response.Success(c, nil)
+}
+
+func (s *Server) UpdateKeyPriority(c *gin.Context) {
+	keyIDStr := c.Param("id")
+	keyID, err := strconv.Atoi(keyIDStr)
+	if err != nil || keyID <= 0 {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrBadRequest, "invalid key ID format"))
+		return
+	}
+
+	var req UpdateKeyPriorityRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrInvalidJSON, err.Error()))
+		return
+	}
+
+	if req.Priority <= 0 {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, "priority must be greater than 0"))
+		return
+	}
+
+	key, err := s.KeyProvider.UpdateKeyPriority(uint(keyID), req.Priority)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			response.Error(c, app_errors.ErrResourceNotFound)
+		} else {
+			response.Error(c, app_errors.ParseDBError(err))
+		}
+		return
+	}
+
+	response.Success(c, key)
+}
+
+func (s *Server) UpdateKey(c *gin.Context) {
+	keyIDStr := c.Param("id")
+	keyID, err := strconv.Atoi(keyIDStr)
+	if err != nil || keyID <= 0 {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrBadRequest, "invalid key ID format"))
+		return
+	}
+
+	var req UpdateKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrInvalidJSON, err.Error()))
+		return
+	}
+
+	if req.Notes != nil && utf8.RuneCountInString(strings.TrimSpace(*req.Notes)) > 255 {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, "notes length must be <= 255 characters"))
+		return
+	}
+	if req.Priority != nil && *req.Priority <= 0 {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, "priority must be greater than 0"))
+		return
+	}
+
+	key, err := s.KeyService.UpdateKey(c.Request.Context(), uint(keyID), services.KeyUpdateParams{
+		Notes:               req.Notes,
+		Priority:            req.Priority,
+		Config:              req.Config,
+		ProbeParamOverrides: req.ProbeParamOverrides,
+	})
+	if s.handleKeyError(c, err) {
+		return
+	}
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			response.Error(c, app_errors.ErrResourceNotFound)
+		} else {
+			response.Error(c, app_errors.ParseDBError(err))
+		}
+		return
+	}
+
+	response.Success(c, key)
 }

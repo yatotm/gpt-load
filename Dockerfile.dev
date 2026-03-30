@@ -1,0 +1,25 @@
+FROM golang:1.25-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates tzdata nodejs npm git && \
+    update-ca-certificates
+
+# 安装 air 用于 Go 热重载
+RUN go install github.com/air-verse/air@latest
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# 安装前端依赖
+WORKDIR /app/web
+RUN npm ci
+
+WORKDIR /app
+
+EXPOSE 3001
+
+# 使用 air 启动后端，前端用 vite dev server（后端会代理前端）
+CMD ["sh", "-c", "cd /app/web && npm run dev -- --host 0.0.0.0 & cd /app && air"]

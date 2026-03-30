@@ -11,6 +11,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"go.uber.org/dig"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -19,6 +20,11 @@ type KeyTestResult struct {
 	KeyValue string `json:"key_value"`
 	IsValid  bool   `json:"is_valid"`
 	Error    string `json:"error,omitempty"`
+}
+
+type ConnectivityCheckOptions struct {
+	TimeoutSeconds      int
+	ProbeParamOverrides datatypes.JSONMap
 }
 
 // KeyValidator provides methods to validate API keys.
@@ -52,24 +58,21 @@ func NewKeyValidator(params KeyValidatorParams) *KeyValidator {
 
 // ValidateSingleKey performs a validation check on a single API key.
 func (s *KeyValidator) ValidateSingleKey(key *models.APIKey, group *models.Group) (bool, error) {
-	if group.EffectiveConfig.AppUrl == "" {
-		group.EffectiveConfig = s.SettingsManager.GetEffectiveConfig(group.Config)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(group.EffectiveConfig.KeyValidationTimeoutSeconds)*time.Second)
-	defer cancel()
-
-	ch, err := s.channelFactory.GetChannel(group)
-	if err != nil {
-		return false, fmt.Errorf("failed to get channel for group %s: %w", group.Name, err)
+	effectiveKeyConfig := group.EffectiveConfig
+	if s.SettingsManager != nil {
+		effectiveKeyConfig = s.SettingsManager.GetEffectiveKeyConfig(group.Config, key.Config)
 	}
 
-	isValid, validationErr := ch.ValidateKey(ctx, key, group)
+	isValid, validationErr := s.CheckKeyConnectivity(key, group, effectiveKeyConfig.KeyValidationTimeoutSeconds)
 
 	var errorMsg string
 	if !isValid && validationErr != nil {
 		errorMsg = validationErr.Error()
 	}
 	s.keypoolProvider.UpdateStatus(key, group, isValid, errorMsg)
+	if err := s.keypoolProvider.MarkKeyValidated(key.ID, time.Now()); err != nil {
+		logrus.WithError(err).WithField("key_id", key.ID).Warn("failed to update key last_validated_at")
+	}
 
 	if !isValid {
 		logrus.WithFields(logrus.Fields{
@@ -86,6 +89,36 @@ func (s *KeyValidator) ValidateSingleKey(key *models.APIKey, group *models.Group
 	}).Debug("Key validation successful")
 
 	return true, nil
+}
+
+func (s *KeyValidator) CheckKeyConnectivity(key *models.APIKey, group *models.Group, timeoutSeconds int) (bool, error) {
+	return s.CheckKeyConnectivityWithOptions(key, group, ConnectivityCheckOptions{
+		TimeoutSeconds: timeoutSeconds,
+	})
+}
+
+func (s *KeyValidator) CheckKeyConnectivityWithOptions(key *models.APIKey, group *models.Group, options ConnectivityCheckOptions) (bool, error) {
+	if group.EffectiveConfig.AppUrl == "" {
+		group.EffectiveConfig = s.SettingsManager.GetEffectiveConfig(group.Config)
+	}
+	if options.TimeoutSeconds <= 0 {
+		options.TimeoutSeconds = group.EffectiveConfig.KeyValidationTimeoutSeconds
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(options.TimeoutSeconds)*time.Second)
+	defer cancel()
+	if len(options.ProbeParamOverrides) > 0 {
+		ctx = channel.WithValidationRequestOptions(ctx, channel.ValidationRequestOptions{
+			ProbeParamOverrides: options.ProbeParamOverrides,
+		})
+	}
+
+	ch, err := s.channelFactory.GetChannel(group)
+	if err != nil {
+		return false, fmt.Errorf("failed to get channel for group %s: %w", group.Name, err)
+	}
+
+	return ch.ValidateKey(ctx, key, group)
 }
 
 // TestMultipleKeys performs a synchronous validation for a list of key values within a specific group.

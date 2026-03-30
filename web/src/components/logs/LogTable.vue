@@ -66,6 +66,8 @@ const currentPage = ref(1);
 const pageSize = ref(15);
 const total = ref(0);
 const totalPages = computed(() => Math.ceil(total.value / pageSize.value));
+const SHOW_PROBE_LOGS_STORAGE_KEY = "gpt-load:logs-show-probe";
+const showProbeLogs = ref(loadShowProbeLogs());
 
 // Modal for viewing request/response details
 const showDetailModal = ref(false);
@@ -91,10 +93,35 @@ const successOptions = [
   { label: t("common.error"), value: "false" },
 ];
 
-const requestTypeOptions = [
-  { label: t("logs.retryRequest"), value: "retry" },
-  { label: t("logs.finalRequest"), value: "final" },
-];
+const requestTypeOptions = computed(() => {
+  const options = [
+    { label: t("logs.retryRequest"), value: "retry" },
+    { label: t("logs.finalRequest"), value: "final" },
+  ];
+
+  if (showProbeLogs.value) {
+    options.unshift({ label: t("logs.probeRequest"), value: "probe" });
+  }
+
+  return options;
+});
+
+function loadShowProbeLogs() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return window.localStorage.getItem(SHOW_PROBE_LOGS_STORAGE_KEY) === "true";
+}
+
+function handleProbeLogVisibilityChange(value: boolean) {
+  showProbeLogs.value = value;
+  localStorage.setItem(SHOW_PROBE_LOGS_STORAGE_KEY, String(value));
+  if (!value && filters.request_type === "probe") {
+    filters.request_type = null;
+  }
+  currentPage.value = 1;
+  loadLogs();
+}
 
 // Fetch data
 const loadLogs = async () => {
@@ -103,6 +130,7 @@ const loadLogs = async () => {
     const params: LogFilter = {
       page: currentPage.value,
       page_size: pageSize.value,
+      hide_probe: !showProbeLogs.value && filters.request_type !== "probe",
       parent_group_name: filters.parent_group_name || undefined,
       group_name: filters.group_name || undefined,
       key_value: filters.key_value || undefined,
@@ -243,14 +271,17 @@ const allColumnConfigs: ColumnConfig[] = [
     width: 90,
     defaultVisible: true,
     render: (row: LogRow) => {
-      return h(
-        NTag,
-        { type: row.request_type === "retry" ? "warning" : "default", size: "small", round: true },
-        {
-          default: () =>
-            row.request_type === "retry" ? t("logs.retryRequest") : t("logs.finalRequest"),
-        }
-      );
+      let type: "info" | "warning" | "default" = "default";
+      let text = t("logs.finalRequest");
+      if (row.request_type === "probe") {
+        type = "info";
+        text = t("logs.probeRequest");
+      } else if (row.request_type === "retry") {
+        type = "warning";
+        text = t("logs.retryRequest");
+      }
+
+      return h(NTag, { type, size: "small", round: true }, { default: () => text });
     },
   },
   {
@@ -434,6 +465,7 @@ const resetFilters = () => {
 
 const exportLogs = () => {
   const params: Omit<LogFilter, "page" | "page_size"> = {
+    hide_probe: !showProbeLogs.value && filters.request_type !== "probe",
     parent_group_name: filters.parent_group_name || undefined,
     group_name: filters.group_name || undefined,
     key_value: filters.key_value || undefined,
@@ -573,6 +605,12 @@ const deselectAllColumns = () => {
                 />
               </div>
               <div class="filter-actions">
+                <n-checkbox
+                  :checked="showProbeLogs"
+                  @update:checked="handleProbeLogVisibilityChange"
+                >
+                  {{ t("logs.showProbeLogs") }}
+                </n-checkbox>
                 <n-button-group size="small">
                   <n-tooltip trigger="hover">
                     <template #trigger>
@@ -763,7 +801,14 @@ const deselectAllColumns = () => {
               </div>
               <div class="detail-item-compact">
                 <span class="detail-label-compact">{{ t("logs.requestType") }}:</span>
-                <n-tag v-if="selectedLog.request_type === 'retry'" type="warning" size="small">
+                <n-tag v-if="selectedLog.request_type === 'probe'" type="info" size="small">
+                  {{ t("logs.probeRequest") }}
+                </n-tag>
+                <n-tag
+                  v-else-if="selectedLog.request_type === 'retry'"
+                  type="warning"
+                  size="small"
+                >
                   {{ t("logs.retryRequest") }}
                 </n-tag>
                 <n-tag v-else type="default" size="small">{{ t("logs.finalRequest") }}</n-tag>

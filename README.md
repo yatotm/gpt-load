@@ -2,7 +2,7 @@
 
 English | [中文](README_CN.md) | [日本語](README_JP.md)
 
-[![Release](https://img.shields.io/github/v/release/tbphp/gpt-load)](https://github.com/tbphp/gpt-load/releases)
+[![Release](https://img.shields.io/github/v/release/yatotm/gpt-load)](https://github.com/yatotm/gpt-load/releases)
 ![Go Version](https://img.shields.io/badge/Go-1.24+-blue.svg)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -17,6 +17,9 @@ For detailed documentation, please visit [Official Documentation](https://www.gp
 
 - **Transparent Proxy**: Complete preservation of native API formats, supporting OpenAI, Google Gemini, and Anthropic Claude among other formats
 - **Intelligent Key Management**: High-performance key pool with group-based management, automatic rotation, and failure recovery
+- **Active Probing**: Time-window-based probe failure tracking with automatic blacklist and recovery for unstable upstreams
+- **Granular Overrides**: Group-level and per-key overrides for active probe, passive validation, thresholds, timeouts, and probe-only request parameters
+- **Priority Scheduling**: Key priority support for preferred keys and never-blacklist fallback keys
 - **Load Balancing**: Weighted load balancing across multiple upstream endpoints to enhance service availability
 - **Smart Failure Handling**: Automatic key blacklist management and recovery mechanisms to ensure service continuity
 - **Dynamic Configuration**: System settings and group configurations support hot-reload without requiring restarts
@@ -51,12 +54,12 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    ghcr.io/tbphp/gpt-load:latest
+    yatotm1994/gpt-load:v2.0.0
 ```
 
 > Please change `your-secure-key-here` to a strong password (never use the default value), then you can log in to the management interface: <http://localhost:3001>
 
-### Method 2: Using Docker Compose (Recommended)
+### Method 2: Using Docker Compose for Deployment (Recommended)
 
 **Installation Commands:**
 
@@ -65,8 +68,8 @@ docker run -d --name gpt-load \
 mkdir -p gpt-load && cd gpt-load
 
 # Download configuration files
-wget https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/docker-compose.yml
-wget -O .env https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/.env.example
+wget https://raw.githubusercontent.com/yatotm/gpt-load/refs/heads/main/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/yatotm/gpt-load/refs/heads/main/.env.example
 
 # Edit the .env file and change AUTH_KEY to a strong password. Never use default or simple keys like sk-123456.
 
@@ -76,9 +79,10 @@ docker compose up -d
 
 Before deployment, you must change the default admin key (AUTH_KEY). A recommended format is: sk-prod-[32-character random string].
 
-The default installation uses the SQLite version, which is suitable for lightweight, single-instance applications.
+The default `docker-compose.yml` uses the published Docker Hub image and starts bundled MySQL and Redis services, which is suitable for an out-of-the-box single-instance deployment.
+MySQL, Redis, and application data are stored in Docker named volumes by default.
 
-If you need to install MySQL, PostgreSQL, and Redis, please uncomment the required services in the `docker-compose.yml` file, configure the corresponding environment variables, and restart.
+If you want to use external MySQL, PostgreSQL, or Redis instead, override `DATABASE_DSN` and `REDIS_DSN` in `.env`.
 
 **Other Commands:**
 
@@ -103,13 +107,41 @@ After deployment:
 
 > Use your modified AUTH_KEY to log in to the management interface.
 
-### Method 3: Source Build
+### Method 3: Using Docker Compose for Development
+
+Development mode is intended for local builds, frontend iteration, and UI debugging. It starts:
+
+- a source-mounted Go hot-reload container
+- a Vite dev server
+- local MySQL and Redis services
+
+```bash
+# Clone source
+git clone https://github.com/yatotm/gpt-load.git
+cd gpt-load
+
+# Create configuration
+cp .env.example .env
+
+# Start development stack
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+Development defaults:
+
+- the web UI is exposed through `DEV_UI_PORT`, defaulting to <http://localhost:3001>
+- default MySQL and Redis connection strings are injected for the dev stack
+- development mode shares the same Docker named volumes with the default `docker-compose.yml`, so both modes see the same data when used one at a time
+- do not run both compose stacks at the same time, or they will contend for the same MySQL and Redis data volumes
+- you can still override `DATABASE_DSN`, `REDIS_DSN`, and `VITE_API_BASE_URL` in `.env`
+
+### Method 4: Source Build
 
 Source build requires a locally installed database (SQLite, MySQL, or PostgreSQL) and Redis (optional).
 
 ```bash
 # Clone and build
-git clone https://github.com/tbphp/gpt-load.git
+git clone https://github.com/yatotm/gpt-load.git
 cd gpt-load
 go mod tidy
 
@@ -131,7 +163,7 @@ After deployment:
 
 > Use your modified AUTH_KEY to log in to the management interface.
 
-### Method 4: Cluster Deployment
+### Method 5: Cluster Deployment
 
 Cluster deployment requires all nodes to connect to the same MySQL (or PostgreSQL) and Redis, with Redis being mandatory. It's recommended to use unified distributed MySQL and Redis clusters.
 
@@ -158,7 +190,8 @@ GPT-Load adopts a dual-layer configuration architecture:
 
 - **System Settings**: Stored in database, providing unified behavioral standards for the entire application
 - **Group Configuration**: Behavior parameters customized for specific groups, can override system settings
-- **Configuration Priority**: Group Configuration > System Settings > Environment Configuration
+- **Key Configuration**: Higher-priority per-key overrides for exceptional keys
+- **Configuration Priority**: Key Configuration > Group Configuration > System Settings > Environment Configuration
 - **Characteristics**: Supports hot-reload, takes effect immediately after modification without application restart
 
 <details>

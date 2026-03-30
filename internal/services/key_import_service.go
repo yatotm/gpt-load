@@ -29,6 +29,10 @@ func NewKeyImportService(taskService *TaskService, keyService *KeyService) *KeyI
 
 // StartImportTask initiates a new asynchronous key import task.
 func (s *KeyImportService) StartImportTask(group *models.Group, keysText string) (*TaskStatus, error) {
+	return s.StartImportTaskWithPriority(group, keysText, models.DefaultAPIKeyPriority)
+}
+
+func (s *KeyImportService) StartImportTaskWithPriority(group *models.Group, keysText string, priority int) (*TaskStatus, error) {
 	keys := s.KeyService.ParseKeysFromText(keysText)
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("no valid keys found in the input text")
@@ -39,19 +43,19 @@ func (s *KeyImportService) StartImportTask(group *models.Group, keysText string)
 		return nil, err
 	}
 
-	go s.runImport(group, keys)
+	go s.runImport(group, keys, priority)
 
 	return initialStatus, nil
 }
 
-func (s *KeyImportService) runImport(group *models.Group, keys []string) {
+func (s *KeyImportService) runImport(group *models.Group, keys []string, priority int) {
 	progressCallback := func(processed int) {
 		if err := s.TaskService.UpdateProgress(processed); err != nil {
 			logrus.Warnf("Failed to update task progress for group %d: %v", group.ID, err)
 		}
 	}
 
-	addedCount, ignoredCount, err := s.KeyService.processAndCreateKeys(group.ID, keys, progressCallback)
+	addedCount, ignoredCount, err := s.KeyService.processAndCreateKeys(group.ID, keys, priority, progressCallback)
 	if err != nil {
 		if endErr := s.TaskService.EndTask(nil, err); endErr != nil {
 			logrus.Errorf("Failed to end task with error for group %d: %v (original error: %v)", group.ID, endErr, err)

@@ -110,17 +110,17 @@ func (ch *GeminiChannel) ValidateKey(ctx context.Context, apiKey *models.APIKey,
 	}
 	reqURL += "?key=" + apiKey.KeyValue
 
-	payload := gin.H{
-		"contents": []gin.H{
+	payload := map[string]any{
+		"contents": []map[string]any{
 			{
 				"role": "user",
-				"parts": []gin.H{
+				"parts": []map[string]any{
 					{"text": "hi"},
 				},
 			},
 		},
 	}
-	body, err := json.Marshal(payload)
+	body, err := marshalValidationPayload(ctx, payload)
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal validation payload: %w", err)
 	}

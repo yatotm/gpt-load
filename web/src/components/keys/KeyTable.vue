@@ -1,34 +1,42 @@
 <script setup lang="ts">
 import { keysApi } from "@/api/keys";
-import type { APIKey, Group, KeyStatus } from "@/types/models";
+import type { APIKey, Group, GroupConfigOption, KeyStatus } from "@/types/models";
 import { appState, triggerSyncOperationRefresh } from "@/utils/app-state";
 import { copy } from "@/utils/clipboard";
 import { getGroupDisplayName, maskKey } from "@/utils/display";
 import {
+  Add,
   AddCircleOutline,
-  AlertCircleOutline,
-  CheckmarkCircle,
+  ChevronDown,
+  Close,
   CopyOutline,
   EyeOffOutline,
   EyeOutline,
+  HelpCircleOutline,
   Pencil,
+  Remove,
   RemoveCircleOutline,
   Search,
 } from "@vicons/ionicons5";
 import {
   NButton,
+  NCard,
   NDropdown,
   NEmpty,
   NIcon,
   NInput,
+  NInputGroup,
+  NInputNumber,
   NModal,
   NSelect,
   NSpace,
   NSpin,
+  NSwitch,
+  NTooltip,
   useDialog,
   type MessageReactive,
 } from "naive-ui";
-import { h, ref, watch } from "vue";
+import { computed, h, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import KeyCreateDialog from "./KeyCreateDialog.vue";
 import KeyDeleteDialog from "./KeyDeleteDialog.vue";
@@ -37,6 +45,11 @@ const { t } = useI18n();
 
 interface KeyRow extends APIKey {
   is_visible: boolean;
+}
+
+interface KeyConfigItem {
+  key: string;
+  value: number | string | boolean;
 }
 
 interface Props {
@@ -56,14 +69,12 @@ const totalPages = ref(0);
 const dialog = useDialog();
 const confirmInput = ref("");
 
-// 状态过滤选项
 const statusOptions = [
   { label: t("common.all"), value: "all" },
   { label: t("keys.valid"), value: "active" },
   { label: t("keys.invalid"), value: "invalid" },
 ];
 
-// 更多操作下拉菜单选项
 const moreOptions = [
   { label: t("keys.exportAllKeys"), key: "copyAll" },
   { label: t("keys.exportValidKeys"), key: "copyValid" },
@@ -93,19 +104,39 @@ const isRestoring = ref(false);
 const createDialogShow = ref(false);
 const deleteDialogShow = ref(false);
 
-// 备注编辑相关
-const notesDialogShow = ref(false);
+const editDialogShow = ref(false);
 const editingKey = ref<KeyRow | null>(null);
 const editingNotes = ref("");
+const editingPriority = ref<number | null>(100);
+const configPanelOpen = ref(false);
+const probePanelOpen = ref(false);
+const editingConfigItems = ref<KeyConfigItem[]>([]);
+const editingProbeParamOverrides = ref("");
+const configOptions = ref<GroupConfigOption[]>([]);
+const configOptionsFetched = ref(false);
+
+const supportedKeyOverrideFields = [
+  "blacklist_threshold",
+  "key_validation_interval_minutes",
+  "key_validation_timeout_seconds",
+  "active_probe_enabled",
+  "active_probe_interval_seconds",
+  "active_probe_timeout_seconds",
+  "active_probe_window_minutes",
+  "active_probe_failure_rate_limit",
+];
+
+const keyConfigOptions = computed(() =>
+  configOptions.value.filter(option => supportedKeyOverrideFields.includes(option.key))
+);
 
 watch(
   () => props.selectedGroup,
   async newGroup => {
     if (newGroup) {
-      // 检查重置页面是否会触发分页观察者。
+      await ensureConfigOptionsLoaded();
       const willWatcherTrigger = currentPage.value !== 1 || statusFilter.value !== "all";
       resetPage();
-      // 如果分页观察者不触发，则手动加载。
       if (!willWatcherTrigger) {
         await loadKeys();
       }
@@ -126,29 +157,23 @@ watch(statusFilter, async () => {
   }
 });
 
-// 监听任务完成事件，自动刷新密钥列表
 watch(
   () => appState.groupDataRefreshTrigger,
   () => {
-    // 检查是否需要刷新当前分组的密钥列表
     if (appState.lastCompletedTask && props.selectedGroup) {
-      // 通过分组名称匹配
       const isCurrentGroup = appState.lastCompletedTask.groupName === props.selectedGroup.name;
-
       const shouldRefresh =
         appState.lastCompletedTask.taskType === "KEY_VALIDATION" ||
         appState.lastCompletedTask.taskType === "KEY_IMPORT" ||
         appState.lastCompletedTask.taskType === "KEY_DELETE";
 
       if (isCurrentGroup && shouldRefresh) {
-        // 刷新当前分组的密钥列表
         loadKeys();
       }
     }
   }
 );
 
-// 处理搜索输入的防抖
 function handleSearchInput() {
   if (currentPage.value !== 1) {
     currentPage.value = 1;
@@ -157,7 +182,6 @@ function handleSearchInput() {
   }
 }
 
-// 处理更多操作菜单
 function handleMoreAction(key: string) {
   switch (key) {
     case "copyAll":
@@ -190,6 +214,22 @@ function handleMoreAction(key: string) {
   }
 }
 
+async function ensureConfigOptionsLoaded() {
+  if (configOptionsFetched.value) {
+    return;
+  }
+
+  try {
+    const options = await keysApi.getGroupConfigOptions();
+    configOptions.value = options || [];
+    configOptionsFetched.value = true;
+  } catch (error) {
+    console.error("Load key config options failed", error);
+    window.$message.error(t("keys.loadKeyConfigOptionsFailed"));
+    throw error;
+  }
+}
+
 async function loadKeys() {
   if (!props.selectedGroup?.id) {
     return;
@@ -204,7 +244,10 @@ async function loadKeys() {
       status: statusFilter.value === "all" ? undefined : (statusFilter.value as KeyStatus),
       key_value: searchText.value.trim() || undefined,
     });
-    keys.value = result.items as KeyRow[];
+    keys.value = result.items.map(item => ({
+      ...(item as APIKey),
+      is_visible: false,
+    }));
     total.value = result.pagination.total_items;
     totalPages.value = result.pagination.total_pages;
   } finally {
@@ -212,10 +255,8 @@ async function loadKeys() {
   }
 }
 
-// 处理批量删除成功后的刷新
 async function handleBatchDeleteSuccess() {
   await loadKeys();
-  // 触发同步操作刷新
   if (props.selectedGroup) {
     triggerSyncOperationRefresh(props.selectedGroup.name, "BATCH_DELETE");
   }
@@ -254,7 +295,6 @@ async function testKey(_key: KeyRow) {
       });
     }
     await loadKeys();
-    // 触发同步操作刷新
     triggerSyncOperationRefresh(props.selectedGroup.name, "TEST_SINGLE");
   } catch (_error) {
     console.error("Test failed");
@@ -291,35 +331,183 @@ function toggleKeyVisibility(key: KeyRow) {
   key.is_visible = !key.is_visible;
 }
 
-// 获取要显示的值（备注优先，否则显示密钥）
-function getDisplayValue(key: KeyRow): string {
-  if (key.notes && !key.is_visible) {
-    return key.notes;
-  }
+function getKeyDisplayValue(key: KeyRow): string {
   return key.is_visible ? key.key_value : maskKey(key.key_value);
 }
 
-// 编辑密钥备注
-function editKeyNotes(key: KeyRow) {
-  editingKey.value = key;
-  editingNotes.value = key.notes || "";
-  notesDialogShow.value = true;
+function getNoteText(key: KeyRow): string {
+  return key.notes?.trim() || "";
 }
 
-// 保存备注
-async function saveKeyNotes() {
-  if (!editingKey.value) {
+function hasKeyOverrides(key: KeyRow): boolean {
+  return (
+    Object.keys(key.config || {}).length > 0 ||
+    Object.keys(key.probe_param_overrides || {}).length > 0
+  );
+}
+
+function getKeyConfigOption(key: string) {
+  return keyConfigOptions.value.find(option => option.key === key);
+}
+
+function buildConfigItems(config: Record<string, unknown> | undefined): KeyConfigItem[] {
+  const input = config || {};
+  return Object.entries(input)
+    .filter(([key]) => supportedKeyOverrideFields.includes(key))
+    .map(([key, value]) => ({
+      key,
+      value: value as number | string | boolean,
+    }))
+    .sort((a, b) => {
+      const aIndex = keyConfigOptions.value.findIndex(option => option.key === a.key);
+      const bIndex = keyConfigOptions.value.findIndex(option => option.key === b.key);
+      return aIndex - bIndex;
+    });
+}
+
+function buildConfigPayload(items: KeyConfigItem[]): Record<string, unknown> {
+  return items.reduce<Record<string, unknown>>((accumulator, item) => {
+    if (!item.key) {
+      return accumulator;
+    }
+    accumulator[item.key] = item.value;
+    return accumulator;
+  }, {});
+}
+
+function stableObjectText(input: Record<string, unknown> | undefined): string {
+  const source = input || {};
+  const normalized = Object.keys(source)
+    .sort()
+    .reduce<Record<string, unknown>>((accumulator, key) => {
+      accumulator[key] = source[key];
+      return accumulator;
+    }, {});
+
+  return JSON.stringify(normalized);
+}
+
+function addKeyConfigItem() {
+  editingConfigItems.value.push({
+    key: "",
+    value: "",
+  });
+}
+
+function removeKeyConfigItem(index: number) {
+  editingConfigItems.value.splice(index, 1);
+}
+
+function handleKeyConfigKeyChange(index: number, key: string) {
+  const option = getKeyConfigOption(key);
+  if (!option) {
+    return;
+  }
+  editingConfigItems.value[index].value = option.default_value;
+}
+
+function getEditingOverrideSummary(): string {
+  const configCount = editingConfigItems.value.filter(item => item.key).length;
+  let probeCount = 0;
+
+  const probeText = editingProbeParamOverrides.value.trim();
+  if (probeText && probeText !== "{}") {
+    try {
+      probeCount = Object.keys(JSON.parse(probeText) as Record<string, unknown>).length;
+    } catch {
+      probeCount = editingKey.value ? Object.keys(editingKey.value.probe_param_overrides || {}).length : 0;
+    }
+  }
+
+  if (configCount === 0 && probeCount === 0) {
+    return t("keys.keyInheritSummary");
+  }
+
+  return t("keys.keyOverrideSummary", {
+    configCount,
+    probeCount,
+  });
+}
+
+async function openKeyEditor(key: KeyRow) {
+  try {
+    await ensureConfigOptionsLoaded();
+  } catch {
+    return;
+  }
+  editingKey.value = key;
+  editingNotes.value = key.notes || "";
+  editingPriority.value = key.priority || 100;
+  editingConfigItems.value = buildConfigItems(key.config);
+  editingProbeParamOverrides.value = JSON.stringify(key.probe_param_overrides || {}, null, 2);
+  configPanelOpen.value = false;
+  probePanelOpen.value = false;
+  editDialogShow.value = true;
+}
+
+async function saveKeyMeta() {
+  if (!editingKey.value || !editingPriority.value || editingPriority.value <= 0) {
     return;
   }
 
   try {
-    const trimmed = editingNotes.value.trim();
-    await keysApi.updateKeyNotes(editingKey.value.id, trimmed);
-    editingKey.value.notes = trimmed;
-    window.$message.success(t("keys.notesUpdated"));
-    notesDialogShow.value = false;
+    const nextNotes = editingNotes.value.trim();
+    const nextPriority = editingPriority.value;
+    const nextProbeOverridesText = editingProbeParamOverrides.value.trim();
+    const currentNotes = editingKey.value.notes || "";
+    const currentPriority = editingKey.value.priority || 100;
+    const nextConfig = buildConfigPayload(editingConfigItems.value);
+    const currentConfig = editingKey.value.config || {};
+    const currentProbeOverridesText = JSON.stringify(
+      editingKey.value.probe_param_overrides || {},
+      null,
+      2
+    );
+
+    const notesChanged = nextNotes !== currentNotes;
+    const priorityChanged = nextPriority !== currentPriority;
+    const configChanged = stableObjectText(nextConfig) !== stableObjectText(currentConfig);
+    const probeOverridesChanged = nextProbeOverridesText !== currentProbeOverridesText;
+
+    if (!notesChanged && !priorityChanged && !configChanged && !probeOverridesChanged) {
+      editDialogShow.value = false;
+      return;
+    }
+
+    let nextProbeParamOverrides: Record<string, unknown> = editingKey.value.probe_param_overrides || {};
+
+    if (probeOverridesChanged) {
+      if (!nextProbeOverridesText) {
+        nextProbeParamOverrides = {};
+      } else {
+        try {
+          nextProbeParamOverrides = JSON.parse(nextProbeOverridesText) as Record<string, unknown>;
+        } catch {
+          window.$message.error(t("keys.invalidKeyProbeParamOverridesJson"));
+          return;
+        }
+      }
+    }
+
+    const updated = await keysApi.updateKey(editingKey.value.id, {
+      notes: nextNotes,
+      priority: nextPriority,
+      config: nextConfig,
+      probe_param_overrides: nextProbeParamOverrides,
+    });
+    editingKey.value.notes = updated.notes || "";
+    editingKey.value.priority = updated.priority;
+    editingKey.value.config = updated.config || {};
+    editingKey.value.probe_param_overrides = updated.probe_param_overrides || {};
+
+    editDialogShow.value = false;
+    window.$message.success(t("keys.keyMetaUpdated"));
+
+    if (priorityChanged || configChanged || probeOverridesChanged) {
+      await loadKeys();
+    }
   } catch (error) {
-    console.error("Update notes failed", error);
+    console.error("Update key meta failed", error);
   }
 }
 
@@ -344,7 +532,6 @@ async function restoreKey(key: KeyRow) {
       try {
         await keysApi.restoreKeys(props.selectedGroup.id, key.key_value);
         await loadKeys();
-        // 触发同步操作刷新
         triggerSyncOperationRefresh(props.selectedGroup.name, "RESTORE_SINGLE");
       } catch (_error) {
         console.error("Restore failed");
@@ -377,7 +564,6 @@ async function deleteKey(key: KeyRow) {
       try {
         await keysApi.deleteKeys(props.selectedGroup.id, key.key_value);
         await loadKeys();
-        // 触发同步操作刷新
         triggerSyncOperationRefresh(props.selectedGroup.name, "DELETE_SINGLE");
       } catch (_error) {
         console.error("Delete failed");
@@ -426,6 +612,25 @@ function getStatusClass(status: KeyStatus): string {
   }
 }
 
+function formatProbeRate(rate: number): string {
+  return `${rate.toFixed(1)}%`;
+}
+
+function getProbeRateSummary(key: KeyRow): string {
+  if (key.probe_sample_count <= 0) {
+    return "--";
+  }
+  return `${formatProbeRate(key.probe_failure_rate)} / ${key.probe_sample_count}`;
+}
+
+function getLastUsedText(key: KeyRow): string {
+  return key.last_used_at ? formatRelativeTime(key.last_used_at) : t("keys.unused");
+}
+
+function getLastProbeText(key: KeyRow): string {
+  return key.last_probe_at ? formatRelativeTime(key.last_probe_at) : t("keys.probeNeverShort");
+}
+
 async function copyAllKeys() {
   if (!props.selectedGroup?.id) {
     return;
@@ -470,7 +675,6 @@ async function restoreAllInvalid() {
       try {
         await keysApi.restoreAllInvalidKeys(props.selectedGroup.id);
         await loadKeys();
-        // 触发同步操作刷新
         triggerSyncOperationRefresh(props.selectedGroup.name, "RESTORE_ALL_INVALID");
       } catch (_error) {
         console.error("Restore failed");
@@ -531,7 +735,6 @@ async function clearAllInvalid() {
         const { data } = await keysApi.clearAllInvalidKeys(props.selectedGroup.id);
         window.$message.success(data?.message || t("keys.clearSuccess"));
         await loadKeys();
-        // 触发同步操作刷新
         triggerSyncOperationRefresh(props.selectedGroup.name, "CLEAR_ALL_INVALID");
       } catch (_error) {
         console.error("Delete failed");
@@ -554,7 +757,7 @@ async function clearAll() {
     positiveText: t("common.confirm"),
     negativeText: t("common.cancel"),
     onPositiveClick: () => {
-      confirmInput.value = ""; // Reset before opening second dialog
+      confirmInput.value = "";
       dialog.create({
         title: t("keys.enterGroupNameToConfirm"),
         content: () =>
@@ -579,7 +782,7 @@ async function clearAll() {
         onPositiveClick: async () => {
           if (confirmInput.value !== props.selectedGroup?.name) {
             window.$message.error(t("keys.incorrectGroupName"));
-            return false; // Prevent dialog from closing
+            return false;
           }
 
           if (!props.selectedGroup?.id) {
@@ -591,7 +794,6 @@ async function clearAll() {
             await keysApi.clearAllKeys(props.selectedGroup.id);
             window.$message.success(t("keys.clearAllKeysSuccess"));
             await loadKeys();
-            // Trigger sync operation refresh
             triggerSyncOperationRefresh(props.selectedGroup.name, "CLEAR_ALL");
           } catch (_error) {
             console.error("Clear all failed", _error);
@@ -622,7 +824,6 @@ function resetPage() {
 
 <template>
   <div class="key-table-container">
-    <!-- 工具栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
         <n-button type="success" size="small" @click="createDialogShow = true">
@@ -638,6 +839,7 @@ function resetPage() {
           {{ t("keys.deleteKey") }}
         </n-button>
       </div>
+
       <div class="toolbar-right">
         <n-space :size="12" align="center">
           <n-select
@@ -647,12 +849,13 @@ function resetPage() {
             style="width: 120px"
             :placeholder="t('keys.allStatus')"
           />
+
           <n-input-group>
             <n-input
               v-model:value="searchText"
               :placeholder="t('keys.keyExactMatch')"
               size="small"
-              style="width: 200px"
+              style="width: 220px"
               clearable
               @keyup.enter="handleSearchInput"
             >
@@ -670,10 +873,11 @@ function resetPage() {
               {{ t("common.search") }}
             </n-button>
           </n-input-group>
+
           <n-dropdown :options="moreOptions" trigger="click" @select="handleMoreAction">
             <n-button size="small" tertiary>
               <template #icon>
-                <span style="font-size: 16px; font-weight: bold">⋯</span>
+                <span class="toolbar-more-icon">⋯</span>
               </template>
             </n-button>
           </n-dropdown>
@@ -681,119 +885,64 @@ function resetPage() {
       </div>
     </div>
 
-    <!-- 密钥卡片网格 -->
     <div class="keys-grid-container">
       <n-spin :show="loading">
         <div v-if="keys.length === 0 && !loading" class="empty-container">
           <n-empty :description="t('keys.noMatchingKeys')" />
         </div>
+
         <div v-else class="keys-grid">
-          <div
+          <article
             v-for="key in keys"
             :key="key.id"
             class="key-card"
             :class="getStatusClass(key.status)"
           >
-            <!-- 主要信息行：Key + 快速操作 -->
-            <div class="key-main">
-              <div class="key-section">
-                <n-tag v-if="key.status === 'active'" type="success" :bordered="false" round>
-                  <template #icon>
-                    <n-icon :component="CheckmarkCircle" />
-                  </template>
-                  {{ t("keys.validShort") }}
-                </n-tag>
-                <n-tag v-else :bordered="false" round>
-                  <template #icon>
-                    <n-icon :component="AlertCircleOutline" />
-                  </template>
-                  {{ t("keys.invalidShort") }}
-                </n-tag>
-                <n-input class="key-text" :value="getDisplayValue(key)" readonly size="small" />
-                <div class="quick-actions">
-                  <n-button
-                    size="tiny"
-                    text
-                    @click="editKeyNotes(key)"
-                    :title="t('keys.editNotes')"
-                  >
-                    <template #icon>
-                      <n-icon :component="Pencil" />
-                    </template>
-                  </n-button>
-                  <n-button
-                    size="tiny"
-                    text
-                    @click="toggleKeyVisibility(key)"
-                    :title="t('keys.showHide')"
-                  >
-                    <template #icon>
-                      <n-icon :component="key.is_visible ? EyeOffOutline : EyeOutline" />
-                    </template>
-                  </n-button>
-                  <n-button size="tiny" text @click="copyKey(key)" :title="t('common.copy')">
-                    <template #icon>
-                      <n-icon :component="CopyOutline" />
-                    </template>
-                  </n-button>
-                </div>
-              </div>
+            <!-- Row 1: Status + Key + Note + Actions -->
+            <div class="row-main">
+              <span class="priority-num">{{ key.priority }}</span>
+              <span class="status-dot" :class="getStatusClass(key.status)" />
+              <code class="key-mono" :title="key.key_value">{{ getKeyDisplayValue(key) }}</code>
+              <span v-if="hasKeyOverrides(key)" class="override-tag">{{ t("keys.overrideShort") }}</span>
+              <span v-if="getNoteText(key)" class="note-tag" :title="getNoteText(key)">{{ getNoteText(key) }}</span>
+              <span class="row-spacer" />
+              <span class="icon-actions">
+                <n-button size="tiny" text @click="openKeyEditor(key)" :title="t('keys.editKeyMeta')">
+                  <template #icon><n-icon :component="Pencil" /></template>
+                </n-button>
+                <n-button size="tiny" text @click="toggleKeyVisibility(key)" :title="t('keys.showHide')">
+                  <template #icon><n-icon :component="key.is_visible ? EyeOffOutline : EyeOutline" /></template>
+                </n-button>
+                <n-button size="tiny" text @click="copyKey(key)" :title="t('common.copy')">
+                  <template #icon><n-icon :component="CopyOutline" /></template>
+                </n-button>
+              </span>
             </div>
 
-            <!-- 统计信息 + 操作按钮行 -->
-            <div class="key-bottom">
-              <div class="key-stats">
-                <span class="stat-item">
-                  {{ t("keys.requestsShort") }}
-                  <strong>{{ key.request_count }}</strong>
-                </span>
-                <span class="stat-item">
-                  {{ t("keys.failuresShort") }}
-                  <strong>{{ key.failure_count }}</strong>
-                </span>
-                <span class="stat-item">
-                  {{ key.last_used_at ? formatRelativeTime(key.last_used_at) : t("keys.unused") }}
-                </span>
-              </div>
-              <n-button-group class="key-actions">
-                <n-button
-                  round
-                  tertiary
-                  type="info"
-                  size="tiny"
-                  @click="testKey(key)"
-                  :title="t('keys.testKey')"
-                >
-                  {{ t("keys.testShort") }}
-                </n-button>
-                <n-button
-                  v-if="key.status !== 'active'"
-                  tertiary
-                  size="tiny"
-                  @click="restoreKey(key)"
-                  :title="t('keys.restoreKey')"
-                  type="warning"
-                >
-                  {{ t("keys.restoreShort") }}
-                </n-button>
-                <n-button
-                  round
-                  tertiary
-                  size="tiny"
-                  type="error"
-                  @click="deleteKey(key)"
-                  :title="t('keys.deleteKey')"
-                >
-                  {{ t("common.deleteShort") }}
-                </n-button>
-              </n-button-group>
+            <!-- Row 2: Metrics -->
+            <div class="row-metrics">
+              <span class="metric">{{ t('keys.requestsShort') }} <strong>{{ key.request_count }}</strong></span>
+              <span class="metric-sep" />
+              <span class="metric">{{ t('keys.failuresShort') }} <strong>{{ key.failure_count }}</strong></span>
+              <span class="metric-sep" />
+              <span class="metric">{{ t('keys.rateShort') }} <strong>{{ getProbeRateSummary(key) }}</strong></span>
+              <span class="metric-sep" />
+              <span class="metric">{{ t('keys.probeLastShort') }} <strong :title="key.last_probe_error || ''">{{ getLastProbeText(key) }}</strong></span>
+              <span class="metric-sep" />
+              <span class="metric">{{ t('keys.usedShort') }} <strong>{{ getLastUsedText(key) }}</strong></span>
             </div>
-          </div>
+
+            <!-- Row 3: Action buttons -->
+            <div class="row-actions">
+              <n-button tertiary type="info" size="tiny" @click="testKey(key)">{{ t('keys.testShort') }}</n-button>
+              <n-button v-if="key.status !== 'active'" tertiary size="tiny" type="warning" @click="restoreKey(key)">{{ t('keys.restoreShort') }}</n-button>
+              <n-button tertiary size="tiny" type="error" @click="deleteKey(key)">{{ t('common.deleteShort') }}</n-button>
+            </div>
+          </article>
         </div>
       </n-spin>
     </div>
 
-    <!-- 分页 -->
     <div class="pagination-container">
       <div class="pagination-info">
         <span>{{ t("keys.totalRecords", { total }) }}</span>
@@ -844,27 +993,205 @@ function resetPage() {
     />
   </div>
 
-  <!-- 备注编辑对话框 -->
-  <n-modal v-model:show="notesDialogShow" preset="dialog" :title="t('keys.editKeyNotes')">
-    <n-input
-      v-model:value="editingNotes"
-      type="textarea"
-      :placeholder="t('keys.enterNotes')"
-      :rows="3"
-      maxlength="255"
-      show-count
-    />
-    <template #action>
-      <n-button @click="notesDialogShow = false">{{ t("common.cancel") }}</n-button>
-      <n-button type="primary" @click="saveKeyNotes">{{ t("common.save") }}</n-button>
-    </template>
+  <n-modal :show="editDialogShow" @update:show="editDialogShow = false" class="key-editor-modal">
+    <n-card class="key-editor-card" :bordered="false" size="huge" role="dialog" aria-modal="true">
+      <template #header>
+        <div class="editor-header">
+          <div>
+            <div class="editor-eyebrow">{{ t("keys.singleKeySettings") }}</div>
+            <div class="editor-title">{{ t("keys.editKeyMeta") }}</div>
+          </div>
+          <n-button quaternary circle @click="editDialogShow = false">
+            <template #icon>
+              <n-icon :component="Close" />
+            </template>
+          </n-button>
+        </div>
+      </template>
+
+      <div v-if="editingKey" class="editor-content">
+        <section class="editor-hero">
+          <div class="editor-hero-main">
+            <div class="editor-hero-label">{{ t("keys.keyFingerprint") }}</div>
+            <div class="editor-hero-value">{{ maskKey(editingKey.key_value) }}</div>
+            <div class="editor-hero-meta">
+              <span class="editor-hero-chip" :class="getStatusClass(editingKey.status)">
+                {{ editingKey.status === "active" ? t("keys.valid") : t("keys.invalid") }}
+              </span>
+              <span class="editor-hero-chip neutral">
+                {{ t("keys.priority") }} {{ editingPriority || editingKey.priority }}
+              </span>
+              <span class="editor-hero-chip neutral">{{ getEditingOverrideSummary() }}</span>
+            </div>
+          </div>
+          <div class="editor-hero-side">
+            <div class="editor-side-label">{{ t("keys.group") }}</div>
+            <div class="editor-side-value">
+              {{ selectedGroup ? getGroupDisplayName(selectedGroup) : "--" }}
+            </div>
+          </div>
+        </section>
+
+        <section class="editor-panel">
+          <div class="editor-panel-head">
+            <div>
+              <div class="editor-panel-title">{{ t("keys.basicSettings") }}</div>
+            </div>
+          </div>
+
+          <div class="editor-basic-row">
+            <div class="edit-field-inline">
+              <div class="edit-label">{{ t("keys.priority") }}</div>
+              <n-input-number v-model:value="editingPriority" :min="1" size="small" style="width: 100px" />
+            </div>
+            <div class="edit-field-inline" style="flex: 1; min-width: 0">
+              <div class="edit-label">{{ t("keys.notes") }}</div>
+              <n-input
+                v-model:value="editingNotes"
+                :placeholder="t('keys.enterNotes')"
+                maxlength="255"
+                size="small"
+                style="flex: 1"
+              />
+            </div>
+          </div>
+        </section>
+
+        <section class="editor-panel collapsible">
+          <div class="editor-panel-head clickable" @click="configPanelOpen = !configPanelOpen">
+            <div>
+              <div class="editor-panel-title">{{ t("keys.keyConfigOverrides") }}</div>
+              <div class="editor-panel-desc">
+                {{ t("keys.keyConfigOverridesHint") }}
+              </div>
+            </div>
+            <n-icon :component="ChevronDown" class="collapse-icon" :class="{ open: configPanelOpen }" />
+          </div>
+
+          <div v-if="configPanelOpen" class="collapsible-body">
+            <div v-if="editingConfigItems.length > 0" class="config-items">
+              <div
+                v-for="(configItem, index) in editingConfigItems"
+                :key="`${configItem.key}-${index}`"
+                class="key-config-row"
+              >
+                <div class="config-select">
+                  <n-select
+                    v-model:value="configItem.key"
+                    :options="
+                      keyConfigOptions.map(option => ({
+                        label: option.name,
+                        value: option.key,
+                        disabled:
+                          editingConfigItems
+                            .map(item => item.key)
+                            .includes(option.key) && option.key !== configItem.key,
+                      }))
+                    "
+                    :placeholder="t('keys.selectConfigParam')"
+                    @update:value="value => handleKeyConfigKeyChange(index, value)"
+                    clearable
+                  />
+                </div>
+                <div class="config-value">
+                  <n-tooltip trigger="hover" placement="top">
+                    <template #trigger>
+                      <n-input-number
+                        v-if="typeof configItem.value === 'number'"
+                        v-model:value="configItem.value"
+                        :placeholder="t('keys.paramValue')"
+                        :precision="0"
+                        style="width: 100%"
+                      />
+                      <div v-else-if="typeof configItem.value === 'boolean'" class="config-switch">
+                        <n-switch v-model:value="configItem.value" size="small" />
+                        <span>{{ configItem.value ? t("keys.switchOn") : t("keys.switchOff") }}</span>
+                      </div>
+                      <n-input
+                        v-else
+                        v-model:value="configItem.value"
+                        :placeholder="t('keys.paramValue')"
+                      />
+                    </template>
+                    {{ getKeyConfigOption(configItem.key)?.description || t("keys.setConfigValue") }}
+                  </n-tooltip>
+                </div>
+                <div class="config-actions">
+                  <n-button
+                    @click="removeKeyConfigItem(index)"
+                    type="error"
+                    quaternary
+                    circle
+                    size="small"
+                  >
+                    <template #icon>
+                      <n-icon :component="Remove" />
+                    </template>
+                  </n-button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="editor-empty">
+              <div class="editor-empty-title">{{ t("keys.keyInheritSummary") }}</div>
+              <div class="editor-empty-desc">{{ t("keys.keyConfigEmptyHint") }}</div>
+            </div>
+
+            <n-button
+              @click="addKeyConfigItem"
+              dashed
+              class="editor-add-button"
+              :disabled="editingConfigItems.length >= keyConfigOptions.length"
+            >
+              <template #icon>
+                <n-icon :component="Add" />
+              </template>
+              {{ t("keys.addConfigParam") }}
+            </n-button>
+          </div>
+        </section>
+
+        <section class="editor-panel collapsible">
+          <div class="editor-panel-head clickable" @click="probePanelOpen = !probePanelOpen">
+            <div>
+              <div class="editor-panel-title">{{ t("keys.keyProbeParamOverrides") }}</div>
+              <div class="editor-panel-desc">{{ t("keys.keyProbeParamOverridesHint") }}</div>
+            </div>
+            <div class="panel-head-right">
+              <n-tooltip trigger="hover" placement="top">
+                <template #trigger>
+                  <n-icon :component="HelpCircleOutline" class="editor-help-icon" @click.stop />
+                </template>
+                {{ t("keys.keyProbeParamOverridesDescription") }}
+              </n-tooltip>
+              <n-icon :component="ChevronDown" class="collapse-icon" :class="{ open: probePanelOpen }" />
+            </div>
+          </div>
+
+          <div v-if="probePanelOpen" class="collapsible-body">
+            <n-input
+              v-model:value="editingProbeParamOverrides"
+              type="textarea"
+              :placeholder="t('keys.keyProbeParamOverridesPlaceholder')"
+              :rows="5"
+            />
+          </div>
+        </section>
+      </div>
+
+      <template #footer>
+        <div class="editor-footer">
+          <n-button @click="editDialogShow = false">{{ t("common.cancel") }}</n-button>
+          <n-button type="primary" @click="saveKeyMeta">{{ t("common.save") }}</n-button>
+        </div>
+      </template>
+    </n-card>
   </n-modal>
 </template>
 
 <style scoped>
 .key-table-container {
   background: var(--card-bg-solid);
-  border-radius: 8px;
+  border-radius: 10px;
   box-shadow: var(--shadow-md);
   border: 1px solid var(--border-color);
   overflow: hidden;
@@ -882,11 +1209,6 @@ function resetPage() {
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
   gap: 16px;
-  min-height: 64px;
-}
-
-.toolbar :deep(.n-button) {
-  font-weight: 500;
 }
 
 .toolbar-left {
@@ -904,343 +1226,503 @@ function resetPage() {
   min-width: 0;
 }
 
-.filter-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.more-actions {
-  position: relative;
-}
-
-.more-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  background: var(--card-bg-solid);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  box-shadow: var(--shadow-lg);
-  min-width: 180px;
-  z-index: 1000;
-  overflow: hidden;
-}
-
-.menu-item {
-  display: block;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  background: none;
-  text-align: left;
-  cursor: pointer;
-  font-size: 14px;
-  color: #333;
-  transition: background-color 0.2s;
-}
-
-.menu-item:hover {
-  background: #f8f9fa;
-}
-
-.menu-item.danger {
-  color: #dc3545;
-}
-
-.menu-item.danger:hover {
-  background: #f8d7da;
-}
-
-.menu-divider {
-  height: 1px;
-  background: #e9ecef;
-  margin: 4px 0;
-}
-
-.btn {
-  padding: 6px 12px;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.2s;
-  white-space: nowrap;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.btn-primary {
-  background: #007bff;
-  color: white;
-}
-
-.btn-primary:hover:not(:disabled) {
-  background: #0056b3;
-}
-
-.btn-secondary {
-  background: #6c757d;
-  color: white;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: #545b62;
-}
-
-.more-icon {
+.toolbar-more-icon {
   font-size: 16px;
   font-weight: bold;
 }
 
-.filter-select,
-.search-input,
-.page-size-select {
-  padding: 4px 8px;
-  border: 1px solid #ced4da;
-  border-radius: 4px;
-  font-size: 12px;
-}
-
-.search-input {
-  width: 180px;
-}
-
-.filter-select:focus,
-.search-input:focus,
-.page-size-select:focus {
-  outline: none;
-  border-color: #007bff;
-  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
-}
-
-/* 密钥卡片网格 */
 .keys-grid-container {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 14px;
+  min-height: 0;
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.02), transparent 28%),
+    var(--bg-secondary, transparent);
+}
+
+.keys-grid-container :deep(.n-spin-container),
+.keys-grid-container :deep(.n-spin-content) {
+  min-height: 0;
 }
 
 .keys-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 10px;
 }
 
 .key-card {
-  background: var(--card-bg-solid);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 14px;
-  transition: all 0.2s;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  background: var(--card-bg-solid);
+  transition: border-color 0.15s ease;
 }
 
 .key-card:hover {
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
+  border-color: rgba(15, 23, 42, 0.15);
 }
 
-/* 状态相关样式 */
 .key-card.status-valid {
-  border-color: var(--success-border);
-  background: var(--success-bg);
-  border-width: 1.5px;
+  border-color: rgba(24, 160, 88, 0.18);
 }
 
 .key-card.status-invalid {
-  border-color: var(--invalid-border);
-  background: var(--card-bg-solid);
-  opacity: 0.85;
+  border-color: rgba(208, 48, 80, 0.35);
+  background: rgba(208, 48, 80, 0.055);
+  opacity: 0.78;
 }
 
-.key-card.status-error {
-  border-color: var(--error-border);
-  background: var(--error-bg);
-}
-
-/* 主要信息行 */
-.key-main {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
-.key-section {
+/* Row 1 */
+.row-main {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 1;
   min-width: 0;
 }
 
-/* 底部统计和按钮行 */
-.key-bottom {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
-.key-stats {
-  display: flex;
-  gap: 8px;
-  font-size: 12px;
-  overflow: hidden;
-  color: var(--text-secondary);
-  flex: 1;
-  min-width: 0;
-}
-
-.stat-item {
-  white-space: nowrap;
-  color: var(--text-secondary);
-}
-
-.stat-item strong {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-.key-actions {
+.priority-num {
   flex-shrink: 0;
-  &:deep(.n-button) {
-    padding: 0 4px;
-  }
-}
-
-.key-text {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
-  font-weight: 500;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-/* 浅色主题 */
-:root:not(.dark) .key-text {
-  color: #495057;
-  background: #f8f9fa;
-}
-
-/* 暗黑主题 */
-:root.dark .key-text {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
-}
-
-:deep(.n-input__input-el) {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
-  font-size: 13px;
-}
-
-.quick-actions {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.quick-btn {
-  padding: 4px 6px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  border-radius: 3px;
-  font-size: 12px;
-  transition: background-color 0.2s;
-}
-
-/* 浅色主题 */
-:root:not(.dark) .quick-btn:hover {
-  background: #e9ecef;
-}
-
-/* 暗黑主题 */
-:root.dark .quick-btn:hover {
-  background: var(--bg-tertiary);
-}
-
-/* 统计信息行 */
-
-.action-btn {
-  padding: 2px 6px;
-  border: 1px solid var(--border-color);
-  background: var(--card-bg-solid);
-  border-radius: 3px;
-  cursor: pointer;
   font-size: 10px;
-  font-weight: 500;
-  transition: all 0.2s;
-  white-space: nowrap;
+  font-weight: 700;
+  color: #1f2937;
+  background: rgba(107, 114, 128, 0.15);
+  min-width: 20px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.status-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #999;
+}
+
+.status-dot.status-valid {
+  background: #18a058;
+}
+
+.status-dot.status-invalid {
+  background: #d03050;
+}
+
+.key-mono {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  font-size: 12px;
   color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
-.action-btn:hover {
-  background: var(--bg-secondary);
+.override-tag,
+.note-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 18px;
+  height: 18px;
+  border-radius: 999px;
+  padding: 0 7px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.action-btn.primary {
-  border-color: var(--primary-color);
-  color: var(--primary-color);
+.override-tag {
+  color: #8a5a00;
+  background: rgba(240, 160, 32, 0.12);
 }
 
-.action-btn.primary:hover {
-  background: var(--primary-color);
-  color: white;
+.note-tag {
+  color: #1f2937;
+  background: rgba(107, 114, 128, 0.15);
 }
 
-.action-btn.secondary {
-  border-color: #6c757d;
-  color: #6c757d;
+.key-editor-modal {
+  width: 640px;
 }
 
-.action-btn.secondary:hover {
-  background: #6c757d;
-  color: white;
+.key-editor-card {
+  --n-border-radius: 14px;
+  --n-color: var(--card-bg-solid, #fff);
+  box-shadow:
+    0 24px 48px -12px rgba(0, 0, 0, 0.18),
+    0 0 0 1px rgba(0, 0, 0, 0.05);
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
 }
 
-.action-btn.danger {
-  border-color: #dc3545;
-  color: #dc3545;
+.key-editor-card :deep(.n-card-header) {
+  padding: 16px 20px 12px;
+  border-bottom: none;
+  flex-shrink: 0;
 }
 
-.action-btn.danger:hover {
-  background: #dc3545;
-  color: white;
+.key-editor-card :deep(.n-card__content) {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 20px 16px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-/* 加载和空状态 */
-.loading-state,
-.empty-state {
+.key-editor-card :deep(.n-card__content)::-webkit-scrollbar {
+  display: none;
+}
+
+.key-editor-card :deep(.n-card__footer) {
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  flex-shrink: 0;
+}
+
+.editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.editor-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #6b7280);
+  margin-bottom: 2px;
+  font-weight: 500;
+}
+
+.editor-title {
+  font-size: 17px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--text-primary, #111827);
+  letter-spacing: -0.01em;
+}
+
+.editor-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.editor-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bg-secondary, #f9fafb);
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+}
+
+.editor-hero-main {
+  min-width: 0;
+}
+
+.editor-hero-label,
+.editor-side-label {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #6b7280);
+  font-weight: 500;
+}
+
+.editor-hero-value {
+  margin-top: 4px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary, #111827);
+  word-break: break-all;
+}
+
+.editor-hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.editor-hero-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border: none;
+}
+
+.editor-hero-chip.status-valid {
+  color: #15803d;
+  background: rgba(22, 163, 74, 0.1);
+}
+
+.editor-hero-chip.status-invalid {
+  color: #b91c1c;
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.editor-hero-chip.neutral {
+  color: var(--text-secondary, #475569);
+  background: var(--bg-tertiary, rgba(0, 0, 0, 0.04));
+}
+
+.editor-hero-side {
+  padding-left: 16px;
+  border-left: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  flex-shrink: 0;
+}
+
+.editor-side-value {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary, #0f172a);
+  word-break: break-word;
+}
+
+.editor-panel {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  background: var(--card-bg-solid, #fff);
+}
+
+.editor-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.editor-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #111827);
+}
+
+.editor-panel-desc {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary, #6b7280);
+}
+
+.editor-help-icon {
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--text-secondary, #94a3b8);
+  cursor: help;
+}
+
+.editor-basic-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.edit-field-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.edit-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary, #6b7280);
+  white-space: nowrap;
+}
+
+.editor-panel.collapsible {
+  padding: 0;
+}
+
+.editor-panel-head.clickable {
+  cursor: pointer;
+  padding: 10px 14px;
+  border-radius: 10px;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.editor-panel-head.clickable:hover {
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.02));
+}
+
+.panel-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.collapse-icon {
+  font-size: 16px;
+  color: var(--text-secondary, #94a3b8);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.collapse-icon.open {
+  transform: rotate(180deg);
+}
+
+.collapsible-body {
+  padding: 0 14px 12px;
+}
+
+.editor-notes-field {
+  min-width: 0;
+}
+
+.config-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.key-config-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) 28px;
+  gap: 8px;
+  align-items: center;
+}
+
+.config-select,
+.config-value {
+  min-width: 0;
+}
+
+.config-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  background: var(--bg-secondary, #f9fafb);
+  color: var(--text-secondary, #475569);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.config-actions {
   display: flex;
   justify-content: center;
+}
+
+.editor-empty {
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px dashed var(--border-color, rgba(0, 0, 0, 0.1));
+  background: var(--bg-secondary, #f9fafb);
+}
+
+.editor-empty-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary, #0f172a);
+}
+
+.editor-empty-desc {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary, #6b7280);
+}
+
+.editor-add-button {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.editor-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.row-spacer {
+  flex: 1;
+}
+
+.icon-actions {
+  display: flex;
   align-items: center;
-  height: 200px;
-  color: #6c757d;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
-.loading-spinner {
-  font-size: 14px;
+.icon-actions :deep(.n-button) {
+  color: var(--text-secondary);
 }
 
-.empty-text {
-  font-size: 14px;
+/* Row 2 */
+.row-metrics {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 0;
 }
 
-/* 分页 */
+.metric {
+  white-space: nowrap;
+}
+
+.metric strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.metric-sep {
+  width: 1px;
+  height: 10px;
+  background: rgba(120, 120, 120, 0.2);
+  flex-shrink: 0;
+}
+
+/* Row 3 */
+.row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.empty-container {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .pagination-container {
   display: flex;
   justify-content: space-between;
@@ -1249,7 +1731,6 @@ function resetPage() {
   background: var(--card-bg-solid);
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
-  border-radius: 0 0 8px 8px;
 }
 
 .pagination-info {
@@ -1271,22 +1752,92 @@ function resetPage() {
   color: var(--text-secondary);
 }
 
-@media (max-width: 768px) {
+@media (max-width: 960px) {
   .toolbar {
     flex-direction: column;
     align-items: stretch;
-    gap: 12px;
   }
 
   .toolbar-left,
   .toolbar-right {
     width: 100%;
+  }
+
+  .toolbar-right :deep(.n-space) {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .key-editor-modal {
+    width: calc(100vw - 24px);
+  }
+
+  .editor-hero {
+    flex-direction: column;
+  }
+
+  .editor-hero-side {
+    padding-left: 0;
+    padding-top: 12px;
+    border-left: none;
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+  }
+
+  .editor-basic-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .edit-field-inline {
+    width: 100%;
+  }
+
+  .key-config-row {
+    grid-template-columns: 1fr;
+  }
+
+  .config-actions {
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 768px) {
+  .keys-grid-container {
+    padding: 12px;
+  }
+
+  .keys-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pagination-container {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .pagination-controls {
     justify-content: space-between;
   }
 
-  .toolbar-right .n-space {
-    width: 100%;
-    justify-content: space-between;
+  .key-editor-card :deep(.n-card__content) {
+    padding: 0 14px 14px;
+  }
+
+  .editor-panel,
+  .editor-hero {
+    padding: 10px 12px;
+  }
+}
+
+@media (max-width: 520px) {
+  .row-main {
+    flex-wrap: wrap;
+  }
+
+  .row-metrics {
+    gap: 4px;
   }
 }
 </style>

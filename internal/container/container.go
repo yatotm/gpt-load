@@ -73,6 +73,11 @@ func BuildContainer() (*dig.Container, error) {
 	if err := container.Provide(services.NewRequestLogService); err != nil {
 		return nil, err
 	}
+	if err := container.Provide(func(service *services.RequestLogService) keypool.RequestLogger {
+		return service
+	}); err != nil {
+		return nil, err
+	}
 	if err := container.Provide(services.NewSubGroupManager); err != nil {
 		return nil, err
 	}

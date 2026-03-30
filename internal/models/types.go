@@ -13,6 +13,8 @@ const (
 	KeyStatusInvalid = "invalid"
 )
 
+const DefaultAPIKeyPriority = 100
+
 // SystemSetting 对应 system_settings 表
 type SystemSetting struct {
 	ID           uint      `gorm:"primaryKey;autoIncrement" json:"id"`
@@ -37,7 +39,24 @@ type GroupConfig struct {
 	KeyValidationIntervalMinutes *int    `json:"key_validation_interval_minutes,omitempty"`
 	KeyValidationConcurrency     *int    `json:"key_validation_concurrency,omitempty"`
 	KeyValidationTimeoutSeconds  *int    `json:"key_validation_timeout_seconds,omitempty"`
+	ActiveProbeEnabled           *bool   `json:"active_probe_enabled,omitempty"`
+	ActiveProbeIntervalSeconds   *int    `json:"active_probe_interval_seconds,omitempty"`
+	ActiveProbeTimeoutSeconds    *int    `json:"active_probe_timeout_seconds,omitempty"`
+	ActiveProbeWindowMinutes     *int    `json:"active_probe_window_minutes,omitempty"`
+	ActiveProbeFailureRateLimit  *int    `json:"active_probe_failure_rate_limit,omitempty"`
 	EnableRequestBodyLogging     *bool   `json:"enable_request_body_logging,omitempty"`
+}
+
+// KeyConfig 存储仅对单个密钥生效的配置覆盖。
+type KeyConfig struct {
+	BlacklistThreshold           *int  `json:"blacklist_threshold,omitempty"`
+	KeyValidationIntervalMinutes *int  `json:"key_validation_interval_minutes,omitempty"`
+	KeyValidationTimeoutSeconds  *int  `json:"key_validation_timeout_seconds,omitempty"`
+	ActiveProbeEnabled           *bool `json:"active_probe_enabled,omitempty"`
+	ActiveProbeIntervalSeconds   *int  `json:"active_probe_interval_seconds,omitempty"`
+	ActiveProbeTimeoutSeconds    *int  `json:"active_probe_timeout_seconds,omitempty"`
+	ActiveProbeWindowMinutes     *int  `json:"active_probe_window_minutes,omitempty"`
+	ActiveProbeFailureRateLimit  *int  `json:"active_probe_failure_rate_limit,omitempty"`
 }
 
 // HeaderRule defines a single rule for header manipulation.
@@ -93,6 +112,7 @@ type Group struct {
 	Sort                int                  `gorm:"default:0" json:"sort"`
 	TestModel           string               `gorm:"type:varchar(255);not null" json:"test_model"`
 	ParamOverrides      datatypes.JSONMap    `gorm:"type:json" json:"param_overrides"`
+	ProbeParamOverrides datatypes.JSONMap    `gorm:"type:json" json:"probe_param_overrides"`
 	Config              datatypes.JSONMap    `gorm:"type:json" json:"config"`
 	HeaderRules         datatypes.JSON       `gorm:"type:json" json:"header_rules"`
 	ModelRedirectRules  datatypes.JSONMap    `gorm:"type:json" json:"model_redirect_rules"`
@@ -111,23 +131,34 @@ type Group struct {
 
 // APIKey 对应 api_keys 表
 type APIKey struct {
-	ID           uint       `gorm:"primaryKey;autoIncrement;index:idx_api_keys_group_last_used_id,priority:3" json:"id"`
-	KeyValue     string     `gorm:"type:text;not null" json:"key_value"`
-	KeyHash      string     `gorm:"type:varchar(128);index" json:"key_hash"`
-	GroupID      uint       `gorm:"not null;index;index:idx_api_keys_group_last_used_id,priority:1" json:"group_id"`
-	Status       string     `gorm:"type:varchar(50);not null;default:'active';index" json:"status"`
-	Notes        string     `gorm:"type:varchar(255);default:''" json:"notes"`
-	RequestCount int64      `gorm:"not null;default:0" json:"request_count"`
-	FailureCount int64      `gorm:"not null;default:0" json:"failure_count"`
-	LastUsedAt   *time.Time `gorm:"index:idx_api_keys_group_last_used_id,priority:2" json:"last_used_at"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID                  uint              `gorm:"primaryKey;autoIncrement;index:idx_api_keys_group_last_used_id,priority:3" json:"id"`
+	KeyValue            string            `gorm:"type:text;not null" json:"key_value"`
+	KeyHash             string            `gorm:"type:varchar(128);index" json:"key_hash"`
+	GroupID             uint              `gorm:"not null;index;index:idx_api_keys_group_last_used_id,priority:1" json:"group_id"`
+	Status              string            `gorm:"type:varchar(50);not null;default:'active';index" json:"status"`
+	Priority            int               `gorm:"not null;default:100;index" json:"priority"`
+	Notes               string            `gorm:"type:varchar(255);default:''" json:"notes"`
+	Config              datatypes.JSONMap `gorm:"type:json" json:"config"`
+	ProbeParamOverrides datatypes.JSONMap `gorm:"type:json" json:"probe_param_overrides"`
+	RequestCount        int64             `gorm:"not null;default:0" json:"request_count"`
+	FailureCount        int64             `gorm:"not null;default:0" json:"failure_count"`
+	LastUsedAt          *time.Time        `gorm:"index:idx_api_keys_group_last_used_id,priority:2" json:"last_used_at"`
+	LastValidatedAt     *time.Time        `gorm:"index" json:"last_validated_at"`
+	LastProbeAt         *time.Time        `gorm:"index" json:"last_probe_at"`
+	LastProbeSuccess    bool              `gorm:"not null;default:false" json:"last_probe_success"`
+	LastProbeStatusCode int               `gorm:"not null;default:0" json:"last_probe_status_code"`
+	LastProbeError      string            `gorm:"type:text" json:"last_probe_error"`
+	ProbeFailureRate    float64           `gorm:"not null;default:0" json:"probe_failure_rate"`
+	ProbeSampleCount    int64             `gorm:"not null;default:0" json:"probe_sample_count"`
+	CreatedAt           time.Time         `json:"created_at"`
+	UpdatedAt           time.Time         `json:"updated_at"`
 }
 
 // RequestType 请求类型常量
 const (
 	RequestTypeRetry = "retry"
 	RequestTypeFinal = "final"
+	RequestTypeProbe = "probe"
 )
 
 // RequestLog 对应 request_logs 表

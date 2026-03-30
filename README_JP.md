@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
-[![Release](https://img.shields.io/github/v/release/tbphp/gpt-load)](https://github.com/tbphp/gpt-load/releases)
+[![Release](https://img.shields.io/github/v/release/yatotm/gpt-load)](https://github.com/yatotm/gpt-load/releases)
 ![Go Version](https://img.shields.io/badge/Go-1.24+-blue.svg)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -17,6 +17,9 @@
 
 - **トランスペアレントプロキシ**: ネイティブAPIフォーマットの完全な保持、OpenAI、Google Gemini、Anthropic Claudeなどのフォーマットをサポート
 - **インテリジェントキー管理**: グループベース管理、自動ローテーション、障害復旧を備えた高性能キープール
+- **アクティブプローブ**: 時間窓ベースの失敗率集計により、不安定な上流に対して自動ブラックリスト化と自動復帰を実現
+- **きめ細かな上書き**: グループ単位と Key 単位で、アクティブプローブ、受動検証、閾値、タイムアウト、プローブ専用パラメーターを上書き可能
+- **優先度スケジューリング**: 主力 Key やブラックリスト化しないフォールバック Key を優先度で運用可能
 - **ロードバランシング**: サービスの可用性を向上させる複数のアップストリームエンドポイント間の重み付けロードバランシング
 - **スマート障害処理**: サービスの継続性を確保する自動キーブラックリスト管理と復旧メカニズム
 - **動的設定**: システム設定とグループ設定は再起動不要のホットリロードをサポート
@@ -51,12 +54,12 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    ghcr.io/tbphp/gpt-load:latest
+    yatotm1994/gpt-load:v2.0.0
 ```
 
 > `your-secure-key-here`を強力なパスワードに変更してください（デフォルト値は絶対に使用しないでください）。その後、管理インターフェースにログインできます：<http://localhost:3001>
 
-### 方法2: Docker Composeを使用（推奨）
+### 方法2: Docker Composeで本番デプロイ（推奨）
 
 **インストールコマンド：**
 
@@ -65,8 +68,8 @@ docker run -d --name gpt-load \
 mkdir -p gpt-load && cd gpt-load
 
 # 設定ファイルをダウンロード
-wget https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/docker-compose.yml
-wget -O .env https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/.env.example
+wget https://raw.githubusercontent.com/yatotm/gpt-load/refs/heads/main/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/yatotm/gpt-load/refs/heads/main/.env.example
 
 # .envファイルを編集し、AUTH_KEYを強力なパスワードに変更します。デフォルトやsk-123456のような単純なキーは絶対に使用しないでください。
 
@@ -76,9 +79,10 @@ docker compose up -d
 
 デプロイメント前に、デフォルトの管理キー（AUTH_KEY）を必ず変更してください。推奨フォーマット：sk-prod-[32文字のランダム文字列]。
 
-デフォルトのインストールは、軽量な単一インスタンスアプリケーションに適したSQLiteバージョンを使用します。
+デフォルトの `docker-compose.yml` は公開済み Docker Hub イメージを使用し、あわせて MySQL / Redis も起動します。単一インスタンスをすぐに立ち上げたい場合に向いています。
+MySQL、Redis、およびアプリケーションデータは既定で Docker named volume に保存されます。
 
-MySQL、PostgreSQL、Redisをインストールする必要がある場合は、`docker-compose.yml`ファイルで必要なサービスのコメントを解除し、対応する環境変数を設定して、再起動してください。
+外部の MySQL、PostgreSQL、Redis を使いたい場合は、`.env` 内の `DATABASE_DSN` と `REDIS_DSN` を上書きしてください。
 
 **その他のコマンド：**
 
@@ -103,13 +107,41 @@ docker compose pull && docker compose down && docker compose up -d
 
 > 変更したAUTH_KEYを使用して管理インターフェースにログインしてください。
 
-### 方法3: ソースビルド
+### 方法3: Docker Composeで開発モード
+
+開発モードはローカルビルド、フロントエンド調整、UI デバッグ向けです。以下を起動します：
+
+- ソースコードをマウントした Go ホットリロード環境
+- Vite 開発サーバー
+- ローカル MySQL / Redis
+
+```bash
+# クローン
+git clone https://github.com/yatotm/gpt-load.git
+cd gpt-load
+
+# 設定を作成
+cp .env.example .env
+
+# 開発環境を起動
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+開発モードの既定動作：
+
+- Web UI は `DEV_UI_PORT` 経由で公開され、既定では <http://localhost:3001>
+- 開発スタック向けに MySQL / Redis の接続先が自動で注入されます
+- 開発モードは既定の `docker-compose.yml` と同じ Docker named volume を共有するため、モードを切り替えても同じデータを参照します
+- ただし 2 つの compose を同時に起動すると、同じ MySQL / Redis データボリュームを奪い合うので避けてください
+- `.env` で `DATABASE_DSN`、`REDIS_DSN`、`VITE_API_BASE_URL` を上書きできます
+
+### 方法4: ソースビルド
 
 ソースビルドには、ローカルにインストールされたデータベース（SQLite、MySQL、またはPostgreSQL）とRedis（オプション）が必要です。
 
 ```bash
 # クローンとビルド
-git clone https://github.com/tbphp/gpt-load.git
+git clone https://github.com/yatotm/gpt-load.git
 cd gpt-load
 go mod tidy
 
@@ -131,7 +163,7 @@ make run
 
 > 変更したAUTH_KEYを使用して管理インターフェースにログインしてください。
 
-### 方法4: クラスターデプロイメント
+### 方法5: クラスターデプロイメント
 
 クラスターデプロイメントでは、すべてのノードが同じMySQL（またはPostgreSQL）とRedisに接続する必要があり、Redisは必須です。統一された分散MySQLとRedisクラスターの使用を推奨します。
 
@@ -158,7 +190,8 @@ GPT-Loadは二層設定アーキテクチャを採用しています：
 
 - **システム設定**: データベースに保存され、アプリケーション全体に統一された動作標準を提供
 - **グループ設定**: 特定のグループ用にカスタマイズされた動作パラメータ、システム設定を上書き可能
-- **設定優先度**: グループ設定 > システム設定 > 環境設定
+- **Key 設定**: 例外的な Key に対して、より高い優先度で個別上書き可能
+- **設定優先度**: Key 設定 > グループ設定 > システム設定 > 環境設定
 - **特性**: ホットリロードをサポート、変更後はアプリケーションの再起動なしで即座に有効
 
 <details>

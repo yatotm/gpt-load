@@ -18,6 +18,9 @@ export default defineConfig(({ mode }) => {
     },
     // 开发服务器配置
     server: {
+      host: "0.0.0.0",
+      port: 5173,
+      strictPort: true,
       // 代理配置示例
       proxy: {
         "/api": {

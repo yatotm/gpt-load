@@ -2,7 +2,15 @@
 import { keysApi } from "@/api/keys";
 import { appState } from "@/utils/app-state";
 import { Close, CloudUploadOutline } from "@vicons/ionicons5";
-import { NButton, NCard, NInput, NModal, NUpload, type UploadFileInfo } from "naive-ui";
+import {
+  NButton,
+  NCard,
+  NInput,
+  NInputNumber,
+  NModal,
+  NUpload,
+  type UploadFileInfo,
+} from "naive-ui";
 import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -27,6 +35,7 @@ const loading = ref(false);
 const keysText = ref("");
 const inputMode = ref<"text" | "file">("text");
 const fileList = ref<UploadFileInfo[]>([]);
+const priority = ref(100);
 
 // 监听弹窗显示状态
 watch(
@@ -43,6 +52,7 @@ function resetForm() {
   keysText.value = "";
   inputMode.value = "text";
   fileList.value = [];
+  priority.value = 100;
 }
 
 // 关闭弹窗
@@ -95,10 +105,10 @@ async function handleSubmit() {
     loading.value = true;
 
     if (inputMode.value === "text") {
-      await keysApi.addKeysAsync(props.groupId, keysText.value);
+      await keysApi.addKeysAsync(props.groupId, keysText.value, undefined, priority.value || 100);
     } else {
       const file = fileList.value[0].file as File;
-      await keysApi.addKeysAsync(props.groupId, undefined, file);
+      await keysApi.addKeysAsync(props.groupId, undefined, file, priority.value || 100);
     }
 
     resetForm();
@@ -139,6 +149,13 @@ function isSubmitDisabled() {
       </template>
 
       <!-- 文本输入模式 -->
+      <div style="margin-top: 20px">
+        <div style="margin-bottom: 8px; font-size: 13px; color: var(--text-color-2)">
+          {{ t("keys.priority") }}
+        </div>
+        <n-input-number v-model:value="priority" :min="1" style="width: 180px" />
+      </div>
+
       <n-input
         v-if="inputMode === 'text'"
         v-model:value="keysText"

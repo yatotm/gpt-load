@@ -1,16 +1,22 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"gpt-load/internal/config"
 	"gpt-load/internal/encryption"
+	app_errors "gpt-load/internal/errors"
 	"gpt-load/internal/keypool"
 	"gpt-load/internal/models"
+	"gpt-load/internal/requestoverride"
 	"io"
+	"reflect"
 	"regexp"
 	"strings"
 
 	"github.com/sirupsen/logrus"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -18,6 +24,13 @@ const (
 	maxRequestKeys = 5000
 	chunkSize      = 500
 )
+
+func normalizePriority(priority int) int {
+	if priority <= 0 {
+		return models.DefaultAPIKeyPriority
+	}
+	return priority
+}
 
 // AddKeysResult holds the result of adding multiple keys.
 type AddKeysResult struct {
@@ -42,25 +55,71 @@ type RestoreKeysResult struct {
 
 // KeyService provides services related to API keys.
 type KeyService struct {
-	DB            *gorm.DB
-	KeyProvider   *keypool.KeyProvider
-	KeyValidator  *keypool.KeyValidator
-	EncryptionSvc encryption.Service
+	DB              *gorm.DB
+	KeyProvider     *keypool.KeyProvider
+	KeyValidator    *keypool.KeyValidator
+	SettingsManager *config.SystemSettingsManager
+	EncryptionSvc   encryption.Service
 }
 
 // NewKeyService creates a new KeyService.
-func NewKeyService(db *gorm.DB, keyProvider *keypool.KeyProvider, keyValidator *keypool.KeyValidator, encryptionSvc encryption.Service) *KeyService {
+func NewKeyService(db *gorm.DB, keyProvider *keypool.KeyProvider, keyValidator *keypool.KeyValidator, settingsManager *config.SystemSettingsManager, encryptionSvc encryption.Service) *KeyService {
 	return &KeyService{
-		DB:            db,
-		KeyProvider:   keyProvider,
-		KeyValidator:  keyValidator,
-		EncryptionSvc: encryptionSvc,
+		DB:              db,
+		KeyProvider:     keyProvider,
+		KeyValidator:    keyValidator,
+		SettingsManager: settingsManager,
+		EncryptionSvc:   encryptionSvc,
 	}
+}
+
+type KeyUpdateParams struct {
+	Notes               *string
+	Priority            *int
+	Config              map[string]any
+	ProbeParamOverrides map[string]any
+}
+
+func (s *KeyService) UpdateKey(_ context.Context, keyID uint, params KeyUpdateParams) (*models.APIKey, error) {
+	var notes *string
+	if params.Notes != nil {
+		trimmed := strings.TrimSpace(*params.Notes)
+		notes = &trimmed
+	}
+
+	cleanedConfig, err := s.validateAndCleanKeyConfig(params.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	normalizedProbeOverrides, err := s.normalizeKeyProbeParamOverrides(params.ProbeParamOverrides)
+	if err != nil {
+		return nil, err
+	}
+
+	update := keypool.KeyMetaUpdate{
+		Notes:    notes,
+		Priority: params.Priority,
+	}
+	if params.Config != nil {
+		configJSON := toJSONMap(cleanedConfig)
+		update.Config = &configJSON
+	}
+	if params.ProbeParamOverrides != nil {
+		probeJSON := toJSONMap(normalizedProbeOverrides)
+		update.ProbeParamOverrides = &probeJSON
+	}
+
+	key, err := s.KeyProvider.UpdateKeyMeta(keyID, update)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 // AddMultipleKeys handles the business logic of creating new keys from a text block.
 // deprecated: use KeyImportService for large imports
-func (s *KeyService) AddMultipleKeys(groupID uint, keysText string) (*AddKeysResult, error) {
+func (s *KeyService) AddMultipleKeys(groupID uint, keysText string, priority int) (*AddKeysResult, error) {
 	keys := s.ParseKeysFromText(keysText)
 	if len(keys) > maxRequestKeys {
 		return nil, fmt.Errorf("batch size exceeds the limit of %d keys, got %d", maxRequestKeys, len(keys))
@@ -69,7 +128,7 @@ func (s *KeyService) AddMultipleKeys(groupID uint, keysText string) (*AddKeysRes
 		return nil, fmt.Errorf("no valid keys found in the input text")
 	}
 
-	addedCount, ignoredCount, err := s.processAndCreateKeys(groupID, keys, nil)
+	addedCount, ignoredCount, err := s.processAndCreateKeys(groupID, keys, priority, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -90,8 +149,11 @@ func (s *KeyService) AddMultipleKeys(groupID uint, keysText string) (*AddKeysRes
 func (s *KeyService) processAndCreateKeys(
 	groupID uint,
 	keys []string,
+	priority int,
 	progressCallback func(processed int),
 ) (addedCount int, ignoredCount int, err error) {
+	priority = normalizePriority(priority)
+
 	// 1. Get existing key hashes in the group for deduplication
 	var existingHashes []string
 	if err := s.DB.Model(&models.APIKey{}).Where("group_id = ?", groupID).Pluck("key_hash", &existingHashes).Error; err != nil {
@@ -130,6 +192,7 @@ func (s *KeyService) processAndCreateKeys(
 			KeyValue: encryptedKey,
 			KeyHash:  keyHash,
 			Status:   models.KeyStatusActive,
+			Priority: priority,
 		})
 	}
 
@@ -301,9 +364,9 @@ func (s *KeyService) ListKeysInGroupQuery(groupID uint, statusFilter string, sea
 		query = query.Where("key_hash = ?", searchHash)
 	}
 
-	orderBy := "last_used_at desc, id desc"
+	orderBy := "priority asc, last_used_at desc, id desc"
 	if s.DB.Dialector.Name() == "postgres" {
-		orderBy = "last_used_at desc nulls last, id desc"
+		orderBy = "priority asc, last_used_at desc nulls last, id desc"
 	}
 
 	query = query.Order(orderBy)
@@ -366,4 +429,79 @@ func (s *KeyService) StreamKeysToWriter(groupID uint, statusFilter string, write
 	}).Error
 
 	return err
+}
+
+func (s *KeyService) validateAndCleanKeyConfig(configMap map[string]any) (map[string]any, error) {
+	if configMap == nil {
+		return nil, nil
+	}
+
+	var tempKeyConfig models.KeyConfig
+	keyConfigType := reflect.TypeOf(tempKeyConfig)
+	validFields := make(map[string]bool)
+	for i := 0; i < keyConfigType.NumField(); i++ {
+		jsonTag := keyConfigType.Field(i).Tag.Get("json")
+		fieldName := strings.Split(jsonTag, ",")[0]
+		if fieldName != "" && fieldName != "-" {
+			validFields[fieldName] = true
+		}
+	}
+
+	for key := range configMap {
+		if !validFields[key] {
+			message := fmt.Sprintf("unknown key config field: '%s'", key)
+			return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_config_format", map[string]any{"error": message})
+		}
+	}
+
+	if s.SettingsManager != nil {
+		if err := s.SettingsManager.ValidateGroupConfigOverrides(configMap); err != nil {
+			return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_config_format", map[string]any{"error": err.Error()})
+		}
+	}
+
+	configBytes, err := json.Marshal(configMap)
+	if err != nil {
+		return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_config_format", map[string]any{"error": err.Error()})
+	}
+
+	var validatedConfig models.KeyConfig
+	if err := json.Unmarshal(configBytes, &validatedConfig); err != nil {
+		return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_config_format", map[string]any{"error": err.Error()})
+	}
+
+	validatedBytes, err := json.Marshal(validatedConfig)
+	if err != nil {
+		return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_config_format", map[string]any{"error": err.Error()})
+	}
+
+	var finalMap map[string]any
+	if err := json.Unmarshal(validatedBytes, &finalMap); err != nil {
+		return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_config_format", map[string]any{"error": err.Error()})
+	}
+
+	return finalMap, nil
+}
+
+func (s *KeyService) normalizeKeyProbeParamOverrides(raw map[string]any) (map[string]any, error) {
+	normalized, err := requestoverride.Normalize(raw)
+	if err != nil {
+		return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_probe_param_overrides", map[string]any{"error": err.Error()})
+	}
+	return normalized, nil
+}
+
+func toJSONMap(input map[string]any) datatypes.JSONMap {
+	if input == nil {
+		return nil
+	}
+	if len(input) == 0 {
+		return datatypes.JSONMap{}
+	}
+
+	result := make(datatypes.JSONMap, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
 }

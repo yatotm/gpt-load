@@ -211,38 +211,67 @@ func (sm *SystemSettingsManager) UpdateSettings(settingsMap map[string]any) erro
 func (sm *SystemSettingsManager) GetEffectiveConfig(groupConfigJSON datatypes.JSONMap) types.SystemSettings {
 	effectiveConfig := sm.GetSettings()
 
-	if groupConfigJSON == nil {
-		return effectiveConfig
-	}
-
-	var groupConfig models.GroupConfig
-	groupConfigBytes, err := groupConfigJSON.MarshalJSON()
-	if err != nil {
-		logrus.Warnf("Failed to marshal group config JSON, using system settings only. Error: %v", err)
-		return effectiveConfig
-	}
-	if err := json.Unmarshal(groupConfigBytes, &groupConfig); err != nil {
-		logrus.Warnf("Failed to unmarshal group config, using system settings only. Error: %v", err)
-		return effectiveConfig
-	}
-
-	gcv := reflect.ValueOf(groupConfig)
-	ecv := reflect.ValueOf(&effectiveConfig).Elem()
-
-	for i := range gcv.NumField() {
-		groupField := gcv.Field(i)
-		if groupField.Kind() == reflect.Ptr && !groupField.IsNil() {
-			groupFieldValue := groupField.Elem()
-			effectiveField := ecv.FieldByName(gcv.Type().Field(i).Name)
-			if effectiveField.IsValid() && effectiveField.CanSet() {
-				if effectiveField.Type() == groupFieldValue.Type() {
-					effectiveField.Set(groupFieldValue)
-				}
-			}
-		}
+	if err := sm.applyOverridesFromJSON(&effectiveConfig, groupConfigJSON, models.GroupConfig{}, "group"); err != nil {
+		logrus.Warnf("Failed to apply group config overrides, using current effective config. Error: %v", err)
 	}
 
 	return effectiveConfig
+}
+
+// GetEffectiveKeyConfig 获取密钥级有效配置（系统配置 + 分组覆盖 + 密钥覆盖）。
+func (sm *SystemSettingsManager) GetEffectiveKeyConfig(groupConfigJSON, keyConfigJSON datatypes.JSONMap) types.SystemSettings {
+	effectiveConfig := sm.GetEffectiveConfig(groupConfigJSON)
+	if err := sm.applyOverridesFromJSON(&effectiveConfig, keyConfigJSON, models.KeyConfig{}, "key"); err != nil {
+		logrus.Warnf("Failed to apply key config overrides, using group effective config. Error: %v", err)
+	}
+	return effectiveConfig
+}
+
+func (sm *SystemSettingsManager) applyOverridesFromJSON(target *types.SystemSettings, raw datatypes.JSONMap, template any, scope string) error {
+	if target == nil || raw == nil {
+		return nil
+	}
+
+	payload, err := raw.MarshalJSON()
+	if err != nil {
+		return fmt.Errorf("failed to marshal %s config JSON: %w", scope, err)
+	}
+
+	overrideValue := reflect.New(reflect.TypeOf(template))
+	if err := json.Unmarshal(payload, overrideValue.Interface()); err != nil {
+		return fmt.Errorf("failed to unmarshal %s config: %w", scope, err)
+	}
+
+	applyPointerOverrides(target, overrideValue.Elem())
+	return nil
+}
+
+func applyPointerOverrides(target *types.SystemSettings, overrides reflect.Value) {
+	if target == nil || !overrides.IsValid() {
+		return
+	}
+
+	targetValue := reflect.ValueOf(target).Elem()
+	overrideType := overrides.Type()
+
+	for i := range overrides.NumField() {
+		overrideField := overrides.Field(i)
+		if overrideField.Kind() != reflect.Ptr || overrideField.IsNil() {
+			continue
+		}
+
+		targetField := targetValue.FieldByName(overrideType.Field(i).Name)
+		if !targetField.IsValid() || !targetField.CanSet() {
+			continue
+		}
+
+		overrideValue := overrideField.Elem()
+		if targetField.Type() != overrideValue.Type() {
+			continue
+		}
+
+		targetField.Set(overrideValue)
+	}
 }
 
 // ValidateSettings 验证系统配置的有效性
@@ -411,6 +440,11 @@ func (sm *SystemSettingsManager) DisplaySystemConfig(settings types.SystemSettin
 	logrus.Infof("    Max Retries: %d", settings.MaxRetries)
 	logrus.Infof("    Blacklist Threshold: %d", settings.BlacklistThreshold)
 	logrus.Infof("    Key Validation Interval: %d minutes", settings.KeyValidationIntervalMinutes)
+	logrus.Infof("    Active Probe Enabled: %t", settings.ActiveProbeEnabled)
+	logrus.Infof("    Active Probe Interval: %d seconds", settings.ActiveProbeIntervalSeconds)
+	logrus.Infof("    Active Probe Timeout: %d seconds", settings.ActiveProbeTimeoutSeconds)
+	logrus.Infof("    Active Probe Window: %d minutes", settings.ActiveProbeWindowMinutes)
+	logrus.Infof("    Active Probe Failure Rate Limit: %d%%", settings.ActiveProbeFailureRateLimit)
 	logrus.Info("====================================")
 	logrus.Info("")
 }

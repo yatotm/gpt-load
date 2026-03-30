@@ -17,6 +17,7 @@ import (
 	"gpt-load/internal/encryption"
 	app_errors "gpt-load/internal/errors"
 	"gpt-load/internal/models"
+	"gpt-load/internal/requestoverride"
 	"gpt-load/internal/utils"
 
 	"github.com/sirupsen/logrus"
@@ -95,6 +96,7 @@ type GroupCreateParams struct {
 	TestModel           string
 	ValidationEndpoint  string
 	ParamOverrides      map[string]any
+	ProbeParamOverrides map[string]any
 	ModelRedirectRules  map[string]string
 	ModelRedirectStrict bool
 	Config              map[string]any
@@ -117,6 +119,7 @@ type GroupUpdateParams struct {
 	HasTestModel        bool
 	ValidationEndpoint  *string
 	ParamOverrides      map[string]any
+	ProbeParamOverrides map[string]any
 	ModelRedirectRules  map[string]string
 	ModelRedirectStrict *bool
 	Config              map[string]any
@@ -231,6 +234,11 @@ func (s *GroupService) CreateGroup(ctx context.Context, params GroupCreateParams
 		return nil, NewI18nError(app_errors.ErrValidation, "validation.invalid_model_redirect", map[string]any{"error": err.Error()})
 	}
 
+	normalizedProbeParamOverrides, err := s.normalizeProbeParamOverrides(params.ProbeParamOverrides)
+	if err != nil {
+		return nil, err
+	}
+
 	group := models.Group{
 		Name:                name,
 		DisplayName:         strings.TrimSpace(params.DisplayName),
@@ -242,6 +250,7 @@ func (s *GroupService) CreateGroup(ctx context.Context, params GroupCreateParams
 		TestModel:           testModel,
 		ValidationEndpoint:  validationEndpoint,
 		ParamOverrides:      params.ParamOverrides,
+		ProbeParamOverrides: normalizedProbeParamOverrides,
 		ModelRedirectRules:  convertToJSONMap(params.ModelRedirectRules),
 		ModelRedirectStrict: params.ModelRedirectStrict,
 		Config:              cleanedConfig,
@@ -434,6 +443,13 @@ func (s *GroupService) UpdateGroup(ctx context.Context, id uint, params GroupUpd
 
 	if params.ParamOverrides != nil {
 		group.ParamOverrides = params.ParamOverrides
+	}
+	if params.ProbeParamOverrides != nil {
+		normalizedProbeParamOverrides, err := s.normalizeProbeParamOverrides(params.ProbeParamOverrides)
+		if err != nil {
+			return nil, err
+		}
+		group.ProbeParamOverrides = normalizedProbeParamOverrides
 	}
 
 	// Validate model redirect rules for aggregate groups
@@ -1049,6 +1065,14 @@ func (s *GroupService) isValidChannelType(channelType string) bool {
 		}
 	}
 	return false
+}
+
+func (s *GroupService) normalizeProbeParamOverrides(raw map[string]any) (map[string]any, error) {
+	normalized, err := requestoverride.Normalize(raw)
+	if err != nil {
+		return nil, NewI18nError(app_errors.ErrValidation, "error.invalid_probe_param_overrides", map[string]any{"error": err.Error()})
+	}
+	return normalized, nil
 }
 
 // convertToJSONMap converts a map[string]string to datatypes.JSONMap

@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文 | [日本語](README_JP.md)
 
-[![Release](https://img.shields.io/github/v/release/tbphp/gpt-load)](https://github.com/tbphp/gpt-load/releases)
+[![Release](https://img.shields.io/github/v/release/yatotm/gpt-load)](https://github.com/yatotm/gpt-load/releases)
 ![Go Version](https://img.shields.io/badge/Go-1.24+-blue.svg)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -17,6 +17,9 @@
 
 - **透明代理**: 完全保留原生 API 格式，支持 OpenAI、Google Gemini 和 Anthropic Claude 等多种格式
 - **智能密钥管理**: 高性能密钥池，支持分组管理、自动轮换和故障恢复
+- **主动探测机制**: 支持按时间窗口统计失败率，自动拉黑与自动恢复，适合不稳定上游的前置筛查
+- **精细化覆写**: 支持分组级与单 Key 级配置覆写，可分别控制主动探测、被动校验、阈值、超时与探测请求参数
+- **优先级调度**: 支持 Key 优先级，便于设置高优先级主力 Key 与永不拉黑的兜底 Key
 - **负载均衡**: 支持多上游端点的加权负载均衡，提升服务可用性
 - **智能故障处理**: 自动密钥黑名单管理和恢复机制，确保服务连续性
 - **动态配置**: 系统设置和分组配置支持热重载，无需重启即可生效
@@ -51,12 +54,12 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    ghcr.io/tbphp/gpt-load:latest
+    yatotm1994/gpt-load:v2.0.0
 ```
 
 > 请将 `your-secure-key-here` 改为强密码（决不能使用默认值），即可登录管理界面：<http://localhost:3001>
 
-### 方式二：使用 Docker Compose（推荐）
+### 方式二：使用 Docker Compose 部署（推荐）
 
 **安装命令：**
 
@@ -65,8 +68,8 @@ docker run -d --name gpt-load \
 mkdir -p gpt-load && cd gpt-load
 
 # 下载配置文件
-wget https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/docker-compose.yml
-wget -O .env https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/.env.example
+wget https://raw.githubusercontent.com/yatotm/gpt-load/refs/heads/main/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/yatotm/gpt-load/refs/heads/main/.env.example
 
 # 编辑 .env 文件，修改AUTH_KEY为强密码，绝不使用 sk-123456 等默认或者简单密钥
 
@@ -76,9 +79,10 @@ docker compose up -d
 
 在部署之前，您必须修改默认的管理密钥 (AUTH_KEY)，建议密钥格式：sk-prod-[随机字符串32位]。
 
-默认安装的是 SQLite 版本，适合轻量单机应用。
+默认 `docker-compose.yml` 会使用已发布的 Docker Hub 镜像，并同时启动 MySQL 与 Redis，适合开箱即用的单机部署。
+MySQL、Redis 和应用数据默认存储在 Docker named volumes 中。
 
-如需安装 MySQL, PostgreSQL 及 Redis，请在 `docker-compose.yml` 文件中取消所需服务的注释，并配置好对应的环境配置重启即可。
+如果你需要接入外部 MySQL、PostgreSQL 或 Redis，可以直接在 `.env` 中覆盖 `DATABASE_DSN` 和 `REDIS_DSN`。
 
 **其他命令：**
 
@@ -103,13 +107,41 @@ docker compose pull && docker compose down && docker compose up -d
 
 > 使用你修改的 AUTH_KEY 登录管理端。
 
-### 方式三：源码构建
+### 方式三：使用 Docker Compose 开发模式
+
+开发模式适合本地编译、前端联调和 UI 调试。它会启动：
+
+- 基于源码挂载的 Go 热重载容器
+- Vite 开发服务器
+- 本地 MySQL 与 Redis
+
+```bash
+# 克隆源码
+git clone https://github.com/yatotm/gpt-load.git
+cd gpt-load
+
+# 创建配置
+cp .env.example .env
+
+# 启动开发环境
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+开发模式默认行为：
+
+- Web 管理界面通过 `DEV_UI_PORT` 暴露，默认 <http://localhost:3001>
+- 容器内会自动为开发环境注入默认的 MySQL / Redis 连接串
+- 开发模式与默认 `docker-compose.yml` 共用同名 Docker volumes，切换模式时会看到同一份数据
+- 不要同时启动两套 compose，否则会争用同一份 MySQL / Redis 数据卷
+- 你依然可以在 `.env` 中覆盖 `DATABASE_DSN`、`REDIS_DSN`、`VITE_API_BASE_URL`
+
+### 方式四：源码构建
 
 源码构建需要本地已安装数据库（SQLite、MySQL 或 PostgreSQL）和 Redis（可选）。
 
 ```bash
 # 克隆并构建
-git clone https://github.com/tbphp/gpt-load.git
+git clone https://github.com/yatotm/gpt-load.git
 cd gpt-load
 go mod tidy
 
@@ -131,7 +163,7 @@ make run
 
 > 使用你修改的 AUTH_KEY 登录管理端。
 
-### 方式四：集群部署
+### 方式五：集群部署
 
 集群部署需要所有节点都连接同一个 MySQL（或者 PostgreSQL） 和 Redis，并且 Redis 是必须要求。建议使用统一的分布式 MySQL 和 Redis 集群。
 
@@ -158,7 +190,8 @@ GPT-Load 采用双层配置架构：
 
 - **系统设置**：存储在数据库中，为整个应用提供统一的行为基准
 - **分组配置**：为特定分组定制的行为参数，可覆盖系统设置
-- **配置优先级**：分组配置 > 系统设置 > 环境配置
+- **密钥配置**：为单个 Key 提供更高优先级的精细化覆写
+- **配置优先级**：密钥配置 > 分组配置 > 系统设置 > 环境配置
 - **特点**：支持热重载，修改后立即生效，无需重启应用
 
 <details>

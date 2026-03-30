@@ -214,7 +214,7 @@ func (s *RequestLogService) writeLogsToDB(logs []*models.RequestLog) error {
 
 		groupedKeyStats := make(map[uint]map[string]keyUsageStat)
 		for _, log := range logs {
-			if !log.IsSuccess || log.KeyHash == "" {
+			if log.RequestType != models.RequestTypeFinal || !log.IsSuccess || log.KeyHash == "" {
 				continue
 			}
 
@@ -272,7 +272,7 @@ func (s *RequestLogService) writeLogsToDB(logs []*models.RequestLog) error {
 			GroupID uint
 		}]struct{ Success, Failure int64 })
 		for _, log := range logs {
-			if log.RequestType == models.RequestTypeRetry {
+			if log.RequestType != models.RequestTypeFinal {
 				continue
 			}
 			hourlyTime := log.Timestamp.Truncate(time.Hour)

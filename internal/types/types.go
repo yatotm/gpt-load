@@ -35,11 +35,16 @@ type SystemSettings struct {
 	ProxyURL              string `json:"proxy_url" name:"config.proxy_url" category:"config.category.request" desc:"config.proxy_url_desc"`
 
 	// 密钥配置
-	MaxRetries                   int `json:"max_retries" default:"3" name:"config.max_retries" category:"config.category.key" desc:"config.max_retries_desc" validate:"required,min=0"`
-	BlacklistThreshold           int `json:"blacklist_threshold" default:"3" name:"config.blacklist_threshold" category:"config.category.key" desc:"config.blacklist_threshold_desc" validate:"required,min=0"`
-	KeyValidationIntervalMinutes int `json:"key_validation_interval_minutes" default:"60" name:"config.key_validation_interval" category:"config.category.key" desc:"config.key_validation_interval_desc" validate:"required,min=1"`
-	KeyValidationConcurrency     int `json:"key_validation_concurrency" default:"10" name:"config.key_validation_concurrency" category:"config.category.key" desc:"config.key_validation_concurrency_desc" validate:"required,min=1"`
-	KeyValidationTimeoutSeconds  int `json:"key_validation_timeout_seconds" default:"20" name:"config.key_validation_timeout" category:"config.category.key" desc:"config.key_validation_timeout_desc" validate:"required,min=1"`
+	MaxRetries                   int  `json:"max_retries" default:"3" name:"config.max_retries" category:"config.category.key" desc:"config.max_retries_desc" validate:"required,min=0"`
+	BlacklistThreshold           int  `json:"blacklist_threshold" default:"3" name:"config.blacklist_threshold" category:"config.category.key" desc:"config.blacklist_threshold_desc" validate:"required,min=0"`
+	KeyValidationIntervalMinutes int  `json:"key_validation_interval_minutes" default:"60" name:"config.key_validation_interval" category:"config.category.key" desc:"config.key_validation_interval_desc" validate:"required,min=1"`
+	KeyValidationConcurrency     int  `json:"key_validation_concurrency" default:"10" name:"config.key_validation_concurrency" category:"config.category.key" desc:"config.key_validation_concurrency_desc" validate:"required,min=1"`
+	KeyValidationTimeoutSeconds  int  `json:"key_validation_timeout_seconds" default:"20" name:"config.key_validation_timeout" category:"config.category.key" desc:"config.key_validation_timeout_desc" validate:"required,min=1"`
+	ActiveProbeEnabled           bool `json:"active_probe_enabled" default:"false" name:"config.active_probe_enabled" category:"config.category.key" desc:"config.active_probe_enabled_desc"`
+	ActiveProbeIntervalSeconds   int  `json:"active_probe_interval_seconds" default:"30" name:"config.active_probe_interval_seconds" category:"config.category.key" desc:"config.active_probe_interval_seconds_desc" validate:"required,min=1"`
+	ActiveProbeTimeoutSeconds    int  `json:"active_probe_timeout_seconds" default:"30" name:"config.active_probe_timeout_seconds" category:"config.category.key" desc:"config.active_probe_timeout_seconds_desc" validate:"required,min=1"`
+	ActiveProbeWindowMinutes     int  `json:"active_probe_window_minutes" default:"10" name:"config.active_probe_window_minutes" category:"config.category.key" desc:"config.active_probe_window_minutes_desc" validate:"required,min=1"`
+	ActiveProbeFailureRateLimit  int  `json:"active_probe_failure_rate_limit" default:"10" name:"config.active_probe_failure_rate_limit" category:"config.category.key" desc:"config.active_probe_failure_rate_limit_desc" validate:"required,min=0"`
 
 	// For cache
 	ProxyKeysMap map[string]struct{} `json:"-"`

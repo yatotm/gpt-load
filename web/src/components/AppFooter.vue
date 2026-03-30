@@ -92,7 +92,7 @@ onMounted(() => {
       <!-- 主要信息区 -->
       <div class="footer-main">
         <span class="project-info">
-          <a href="https://github.com/tbphp/gpt-load" target="_blank" rel="noopener noreferrer">
+          <a href="https://github.com/yatotm/gpt-load" target="_blank" rel="noopener noreferrer">
             <b>GPT-Load</b>
           </a>
         </span>
@@ -150,7 +150,7 @@ onMounted(() => {
           <n-tooltip trigger="hover" placement="top">
             <template #trigger>
               <a
-                href="https://github.com/tbphp/gpt-load"
+                href="https://github.com/yatotm/gpt-load"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="footer-link"
@@ -165,7 +165,7 @@ onMounted(() => {
           <n-tooltip trigger="hover" placement="top">
             <template #trigger>
               <a
-                href="https://github.com/tbphp/gpt-load/issues"
+                href="https://github.com/yatotm/gpt-load/issues"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="footer-link"
@@ -180,7 +180,7 @@ onMounted(() => {
           <n-tooltip trigger="hover" placement="top">
             <template #trigger>
               <a
-                href="https://github.com/tbphp/gpt-load/graphs/contributors"
+                href="https://github.com/yatotm/gpt-load/graphs/contributors"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="footer-link"

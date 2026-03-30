@@ -58,6 +58,7 @@ type GroupCreateRequest struct {
 	TestModel           string              `json:"test_model"`
 	ValidationEndpoint  string              `json:"validation_endpoint"`
 	ParamOverrides      map[string]any      `json:"param_overrides"`
+	ProbeParamOverrides map[string]any      `json:"probe_param_overrides"`
 	ModelRedirectRules  map[string]string   `json:"model_redirect_rules"`
 	ModelRedirectStrict bool                `json:"model_redirect_strict"`
 	Config              map[string]any      `json:"config"`
@@ -84,6 +85,7 @@ func (s *Server) CreateGroup(c *gin.Context) {
 		TestModel:           req.TestModel,
 		ValidationEndpoint:  req.ValidationEndpoint,
 		ParamOverrides:      req.ParamOverrides,
+		ProbeParamOverrides: req.ProbeParamOverrides,
 		ModelRedirectRules:  req.ModelRedirectRules,
 		ModelRedirectStrict: req.ModelRedirectStrict,
 		Config:              req.Config,
@@ -127,6 +129,7 @@ type GroupUpdateRequest struct {
 	TestModel           string              `json:"test_model"`
 	ValidationEndpoint  *string             `json:"validation_endpoint,omitempty"`
 	ParamOverrides      map[string]any      `json:"param_overrides"`
+	ProbeParamOverrides map[string]any      `json:"probe_param_overrides"`
 	ModelRedirectRules  map[string]string   `json:"model_redirect_rules"`
 	ModelRedirectStrict *bool               `json:"model_redirect_strict"`
 	Config              map[string]any      `json:"config"`
@@ -188,6 +191,7 @@ func (s *Server) UpdateGroup(c *gin.Context) {
 		Sort:                req.Sort,
 		ValidationEndpoint:  req.ValidationEndpoint,
 		ParamOverrides:      req.ParamOverrides,
+		ProbeParamOverrides: req.ProbeParamOverrides,
 		ModelRedirectRules:  req.ModelRedirectRules,
 		ModelRedirectStrict: req.ModelRedirectStrict,
 		Config:              req.Config,
@@ -258,6 +262,7 @@ type GroupResponse struct {
 	TestModel           string              `json:"test_model"`
 	ValidationEndpoint  string              `json:"validation_endpoint"`
 	ParamOverrides      datatypes.JSONMap   `json:"param_overrides"`
+	ProbeParamOverrides datatypes.JSONMap   `json:"probe_param_overrides"`
 	ModelRedirectRules  datatypes.JSONMap   `json:"model_redirect_rules"`
 	ModelRedirectStrict bool                `json:"model_redirect_strict"`
 	Config              datatypes.JSONMap   `json:"config"`
@@ -302,6 +307,7 @@ func (s *Server) newGroupResponse(group *models.Group) *GroupResponse {
 		TestModel:           group.TestModel,
 		ValidationEndpoint:  group.ValidationEndpoint,
 		ParamOverrides:      group.ParamOverrides,
+		ProbeParamOverrides: group.ProbeParamOverrides,
 		ModelRedirectRules:  group.ModelRedirectRules,
 		ModelRedirectStrict: group.ModelRedirectStrict,
 		Config:              group.Config,

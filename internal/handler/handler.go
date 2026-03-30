@@ -9,6 +9,7 @@ import (
 	"gpt-load/internal/config"
 	"gpt-load/internal/encryption"
 	"gpt-load/internal/i18n"
+	"gpt-load/internal/keypool"
 	"gpt-load/internal/services"
 	"gpt-load/internal/types"
 
@@ -28,6 +29,7 @@ type Server struct {
 	KeyManualValidationService *services.KeyManualValidationService
 	TaskService                *services.TaskService
 	KeyService                 *services.KeyService
+	KeyProvider                *keypool.KeyProvider
 	KeyImportService           *services.KeyImportService
 	KeyDeleteService           *services.KeyDeleteService
 	LogService                 *services.LogService
@@ -47,6 +49,7 @@ type NewServerParams struct {
 	KeyManualValidationService *services.KeyManualValidationService
 	TaskService                *services.TaskService
 	KeyService                 *services.KeyService
+	KeyProvider                *keypool.KeyProvider
 	KeyImportService           *services.KeyImportService
 	KeyDeleteService           *services.KeyDeleteService
 	LogService                 *services.LogService
@@ -66,6 +69,7 @@ func NewServer(params NewServerParams) *Server {
 		KeyManualValidationService: params.KeyManualValidationService,
 		TaskService:                params.TaskService,
 		KeyService:                 params.KeyService,
+		KeyProvider:                params.KeyProvider,
 		KeyImportService:           params.KeyImportService,
 		KeyDeleteService:           params.KeyDeleteService,
 		LogService:                 params.LogService,

@@ -59,6 +59,11 @@ func (s *LogService) logFiltersScope(c *gin.Context) func(db *gorm.DB) *gorm.DB 
 		if requestType := c.Query("request_type"); requestType != "" {
 			db = db.Where("request_type = ?", requestType)
 		}
+		if hideProbeStr := c.Query("hide_probe"); hideProbeStr != "" {
+			if hideProbe, err := strconv.ParseBool(hideProbeStr); err == nil && hideProbe {
+				db = db.Where("request_type != ?", models.RequestTypeProbe)
+			}
+		}
 		if statusCodeStr := c.Query("status_code"); statusCodeStr != "" {
 			if statusCode, err := strconv.Atoi(statusCodeStr); err == nil {
 				db = db.Where("status_code = ?", statusCode)

@@ -60,6 +60,15 @@ const modelRedirectTip = `{
   "gpt-5": "gpt-5-2025-08-07",
   "gemini-2.5-flash": "gemini-2.5-flash-preview-09-2025"
 }`;
+const probeParamOverrideTip = `{
+  "operations": [
+    {
+      "mode": "set",
+      "path": "generationConfig.thinkingConfig.thinkingBudget",
+      "value": 0
+    }
+  ]
+}`;
 
 // 表单数据接口
 interface GroupFormData {
@@ -72,6 +81,7 @@ interface GroupFormData {
   test_model: string;
   validation_endpoint: string;
   param_overrides: string;
+  probe_param_overrides: string;
   model_redirect_rules: string;
   model_redirect_strict: boolean;
   config: Record<string, number | string | boolean>;
@@ -97,6 +107,7 @@ const formData = reactive<GroupFormData>({
   test_model: "",
   validation_endpoint: "",
   param_overrides: "",
+  probe_param_overrides: "",
   model_redirect_rules: "",
   model_redirect_strict: false,
   config: {},
@@ -298,6 +309,7 @@ function resetForm() {
     test_model: isCreateMode ? testModelPlaceholder.value : "",
     validation_endpoint: "",
     param_overrides: "",
+    probe_param_overrides: "",
     model_redirect_rules: "",
     model_redirect_strict: false,
     config: {},
@@ -340,6 +352,7 @@ function loadGroupData() {
     test_model: props.group.test_model || "",
     validation_endpoint: props.group.validation_endpoint || "",
     param_overrides: JSON.stringify(props.group.param_overrides || {}, null, 2),
+    probe_param_overrides: JSON.stringify(props.group.probe_param_overrides || {}, null, 2),
     model_redirect_rules: JSON.stringify(props.group.model_redirect_rules || {}, null, 2),
     model_redirect_strict: props.group.model_redirect_strict || false,
     config: {},
@@ -480,6 +493,16 @@ async function handleSubmit() {
       }
     }
 
+    let probeParamOverrides = {};
+    if (formData.probe_param_overrides) {
+      try {
+        probeParamOverrides = JSON.parse(formData.probe_param_overrides);
+      } catch {
+        message.error(t("keys.invalidJsonFormat"));
+        return;
+      }
+    }
+
     // 验证模型重定向规则 JSON 格式
     let modelRedirectRules = {};
     if (formData.model_redirect_rules) {
@@ -528,6 +551,7 @@ async function handleSubmit() {
       test_model: formData.test_model,
       validation_endpoint: formData.validation_endpoint,
       param_overrides: paramOverrides,
+      probe_param_overrides: probeParamOverrides,
       model_redirect_rules: modelRedirectRules,
       model_redirect_strict: formData.model_redirect_strict,
       config,
@@ -1164,6 +1188,33 @@ async function handleSubmit() {
                     placeholder='{"temperature": 0.7}'
                     :rows="4"
                   />
+                </n-form-item>
+              </div>
+
+              <div v-if="formData.group_type !== 'aggregate'" class="config-section">
+                <n-form-item path="probe_param_overrides">
+                  <template #label>
+                    <div class="form-label-with-tooltip">
+                      {{ t("keys.probeParamOverrides") }}
+                      <n-tooltip trigger="hover" placement="top">
+                        <template #trigger>
+                          <n-icon :component="HelpCircleOutline" class="help-icon config-help" />
+                        </template>
+                        {{ t("keys.probeParamOverridesTooltip") }}
+                      </n-tooltip>
+                    </div>
+                  </template>
+                  <n-input
+                    v-model:value="formData.probe_param_overrides"
+                    type="textarea"
+                    :placeholder="probeParamOverrideTip"
+                    :rows="6"
+                  />
+                  <template #feedback>
+                    <div style="font-size: 14px; color: #999">
+                      {{ t("keys.probeParamOverridesDescription") }}
+                    </div>
+                  </template>
                 </n-form-item>
               </div>
             </n-collapse-item>

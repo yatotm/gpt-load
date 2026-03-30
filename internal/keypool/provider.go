@@ -9,11 +9,13 @@ import (
 	"gpt-load/internal/models"
 	"gpt-load/internal/store"
 	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -22,6 +24,22 @@ type KeyProvider struct {
 	store           store.Store
 	settingsManager *config.SystemSettingsManager
 	encryptionSvc   encryption.Service
+}
+
+type ProbeStatusUpdate struct {
+	CheckedAt    time.Time
+	Success      bool
+	StatusCode   int
+	ErrorMessage string
+	FailureRate  float64
+	SampleCount  int64
+}
+
+type KeyMetaUpdate struct {
+	Notes               *string
+	Priority            *int
+	Config              *datatypes.JSONMap
+	ProbeParamOverrides *datatypes.JSONMap
 }
 
 // NewProvider 创建一个新的 KeyProvider 实例。
@@ -34,67 +52,225 @@ func NewProvider(db *gorm.DB, store store.Store, settingsManager *config.SystemS
 	}
 }
 
+func normalizePriority(priority int) int {
+	if priority <= 0 {
+		return models.DefaultAPIKeyPriority
+	}
+	return priority
+}
+
+func activeKeysListKey(groupID uint) string {
+	return fmt.Sprintf("group:%d:active_keys", groupID)
+}
+
+func activeKeysPriorityListKey(groupID uint, priority int) string {
+	return fmt.Sprintf("group:%d:active_keys:priority:%d", groupID, normalizePriority(priority))
+}
+
+func groupPriorityOrderKey(groupID uint) string {
+	return fmt.Sprintf("group:%d:priority_order", groupID)
+}
+
+func probeWindowStoreKey(keyID uint) string {
+	return fmt.Sprintf("key:%d:probe_window", keyID)
+}
+
+func resetProbeStatsUpdates() map[string]any {
+	return map[string]any{
+		"probe_failure_rate": 0,
+		"probe_sample_count": 0,
+	}
+}
+
+func (p *KeyProvider) clearProbeWindow(keyID uint) error {
+	if err := p.store.Delete(probeWindowStoreKey(keyID)); err != nil {
+		return fmt.Errorf("failed to clear probe window for key %d: %w", keyID, err)
+	}
+	return nil
+}
+
+func (p *KeyProvider) addActiveKeyToLists(groupID, keyID uint, priority int) error {
+	globalListKey := activeKeysListKey(groupID)
+	if err := p.store.LRem(globalListKey, 0, keyID); err != nil {
+		return fmt.Errorf("failed to remove key %d from global active list before push: %w", keyID, err)
+	}
+	if err := p.store.LPush(globalListKey, keyID); err != nil {
+		return fmt.Errorf("failed to push key %d to global active list: %w", keyID, err)
+	}
+
+	priorityListKey := activeKeysPriorityListKey(groupID, priority)
+	if err := p.store.LRem(priorityListKey, 0, keyID); err != nil {
+		return fmt.Errorf("failed to remove key %d from priority active list before push: %w", keyID, err)
+	}
+	if err := p.store.LPush(priorityListKey, keyID); err != nil {
+		return fmt.Errorf("failed to push key %d to priority active list: %w", keyID, err)
+	}
+
+	return nil
+}
+
+func (p *KeyProvider) removeActiveKeyFromLists(groupID, keyID uint, priority int) error {
+	if err := p.store.LRem(activeKeysListKey(groupID), 0, keyID); err != nil {
+		return fmt.Errorf("failed to remove key %d from global active list: %w", keyID, err)
+	}
+	if err := p.store.LRem(activeKeysPriorityListKey(groupID, priority), 0, keyID); err != nil {
+		return fmt.Errorf("failed to remove key %d from priority active list: %w", keyID, err)
+	}
+	return nil
+}
+
+func (p *KeyProvider) syncGroupPriorityOrder(groupID uint) error {
+	var priorities []int
+	if err := p.db.Model(&models.APIKey{}).
+		Where("group_id = ?", groupID).
+		Distinct("priority").
+		Pluck("priority", &priorities).Error; err != nil {
+		return fmt.Errorf("failed to load group priorities: %w", err)
+	}
+
+	if len(priorities) == 0 {
+		return p.store.Delete(groupPriorityOrderKey(groupID))
+	}
+
+	normalized := make([]int, 0, len(priorities))
+	seen := make(map[int]struct{}, len(priorities))
+	for _, priority := range priorities {
+		priority = normalizePriority(priority)
+		if _, ok := seen[priority]; ok {
+			continue
+		}
+		seen[priority] = struct{}{}
+		normalized = append(normalized, priority)
+	}
+	sort.Ints(normalized)
+
+	parts := make([]string, 0, len(normalized))
+	for _, priority := range normalized {
+		parts = append(parts, strconv.Itoa(priority))
+	}
+
+	return p.store.Set(groupPriorityOrderKey(groupID), []byte(strings.Join(parts, ",")), 0)
+}
+
+func (p *KeyProvider) loadPriorityOrder(groupID uint) ([]int, error) {
+	raw, err := p.store.Get(groupPriorityOrderKey(groupID))
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to get group priority metadata: %w", err)
+		}
+		if err := p.syncGroupPriorityOrder(groupID); err != nil {
+			return nil, err
+		}
+		raw, err = p.store.Get(groupPriorityOrderKey(groupID))
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to reload group priority metadata: %w", err)
+		}
+	}
+
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(text, ",")
+	priorities := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		priority, err := strconv.Atoi(part)
+		if err != nil {
+			continue
+		}
+		priorities = append(priorities, normalizePriority(priority))
+	}
+
+	sort.Ints(priorities)
+	return priorities, nil
+}
+
 // SelectKey 为指定的分组原子性地选择并轮换一个可用的 APIKey。
 func (p *KeyProvider) SelectKey(groupID uint) (*models.APIKey, error) {
-	activeKeysListKey := fmt.Sprintf("group:%d:active_keys", groupID)
-
-	// 1. Atomically rotate the key ID from the list
-	keyIDStr, err := p.store.Rotate(activeKeysListKey)
+	priorities, err := p.loadPriorityOrder(groupID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, app_errors.ErrNoActiveKeys
+		return nil, err
+	}
+	if len(priorities) == 0 {
+		return nil, app_errors.ErrNoActiveKeys
+	}
+
+	globalActiveListKey := activeKeysListKey(groupID)
+
+	for _, priority := range priorities {
+		priorityListKey := activeKeysPriorityListKey(groupID, priority)
+
+		for {
+			keyIDStr, err := p.store.Rotate(priorityListKey)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					break
+				}
+				return nil, fmt.Errorf("failed to rotate key from priority list: %w", err)
+			}
+
+			keyID, err := strconv.ParseUint(keyIDStr, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse key ID '%s': %w", keyIDStr, err)
+			}
+
+			keyHashKey := fmt.Sprintf("key:%d", keyID)
+			keyDetails, err := p.store.HGetAll(keyHashKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get key details for key ID %d: %w", keyID, err)
+			}
+
+			if len(keyDetails) == 0 || keyDetails["status"] != models.KeyStatusActive {
+				_ = p.store.LRem(priorityListKey, 0, keyID)
+				_ = p.store.LRem(globalActiveListKey, 0, keyID)
+				continue
+			}
+
+			failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
+			createdAt, _ := strconv.ParseInt(keyDetails["created_at"], 10, 64)
+			keyPriority, _ := strconv.Atoi(keyDetails["priority"])
+			keyPriority = normalizePriority(keyPriority)
+
+			encryptedKeyValue := keyDetails["key_string"]
+			decryptedKeyValue, err := p.encryptionSvc.Decrypt(encryptedKeyValue)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"keyID": keyID,
+					"error": err,
+				}).Debug("Failed to decrypt key value, using as-is for backward compatibility")
+				decryptedKeyValue = encryptedKeyValue
+			}
+
+			return &models.APIKey{
+				ID:           uint(keyID),
+				KeyValue:     decryptedKeyValue,
+				Status:       keyDetails["status"],
+				FailureCount: failureCount,
+				GroupID:      groupID,
+				Priority:     keyPriority,
+				CreatedAt:    time.Unix(createdAt, 0),
+			}, nil
 		}
-		return nil, fmt.Errorf("failed to rotate key from store: %w", err)
 	}
 
-	keyID, err := strconv.ParseUint(keyIDStr, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse key ID '%s': %w", keyIDStr, err)
-	}
-
-	// 2. Get key details from HASH
-	keyHashKey := fmt.Sprintf("key:%d", keyID)
-	keyDetails, err := p.store.HGetAll(keyHashKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get key details for key ID %d: %w", keyID, err)
-	}
-
-	// 3. Manually unmarshal the map into an APIKey struct
-	failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
-	createdAt, _ := strconv.ParseInt(keyDetails["created_at"], 10, 64)
-
-	// Decrypt the key value for use by channels
-	encryptedKeyValue := keyDetails["key_string"]
-	decryptedKeyValue, err := p.encryptionSvc.Decrypt(encryptedKeyValue)
-	if err != nil {
-		// If decryption fails, try to use the value as-is (backward compatibility for unencrypted keys)
-		logrus.WithFields(logrus.Fields{
-			"keyID": keyID,
-			"error": err,
-		}).Debug("Failed to decrypt key value, using as-is for backward compatibility")
-		decryptedKeyValue = encryptedKeyValue
-	}
-
-	apiKey := &models.APIKey{
-		ID:           uint(keyID),
-		KeyValue:     decryptedKeyValue,
-		Status:       keyDetails["status"],
-		FailureCount: failureCount,
-		GroupID:      groupID,
-		CreatedAt:    time.Unix(createdAt, 0),
-	}
-
-	return apiKey, nil
+	return nil, app_errors.ErrNoActiveKeys
 }
 
 // UpdateStatus 异步地提交一个 Key 状态更新任务。
 func (p *KeyProvider) UpdateStatus(apiKey *models.APIKey, group *models.Group, isSuccess bool, errorMessage string) {
 	go func() {
 		keyHashKey := fmt.Sprintf("key:%d", apiKey.ID)
-		activeKeysListKey := fmt.Sprintf("group:%d:active_keys", group.ID)
 
 		if isSuccess {
-			if err := p.handleSuccess(apiKey.ID, keyHashKey, activeKeysListKey); err != nil {
+			if err := p.handleSuccess(apiKey.ID, keyHashKey); err != nil {
 				logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "error": err}).Error("Failed to handle key success")
 			}
 		} else {
@@ -104,12 +280,195 @@ func (p *KeyProvider) UpdateStatus(apiKey *models.APIKey, group *models.Group, i
 					"error": errorMessage,
 				}).Debug("Uncounted error, skipping failure handling")
 			} else {
-				if err := p.handleFailure(apiKey, group, keyHashKey, activeKeysListKey); err != nil {
+				if err := p.handleFailure(apiKey, group, keyHashKey); err != nil {
 					logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "error": err}).Error("Failed to handle key failure")
 				}
 			}
 		}
 	}()
+}
+
+func (p *KeyProvider) UpdateKeyPriority(keyID uint, priority int) (*models.APIKey, error) {
+	priority = normalizePriority(priority)
+
+	var key models.APIKey
+	var oldPriority int
+	err := p.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&key, keyID).Error; err != nil {
+			return err
+		}
+
+		oldPriority = normalizePriority(key.Priority)
+		key.Priority = priority
+		if oldPriority == priority {
+			return nil
+		}
+
+		return tx.Model(&key).Update("priority", priority).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.store.HSet(fmt.Sprintf("key:%d", key.ID), map[string]any{"priority": priority}); err != nil {
+		return nil, fmt.Errorf("failed to update key priority in store: %w", err)
+	}
+
+	if key.Status == models.KeyStatusActive && oldPriority != priority {
+		if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, oldPriority), 0, key.ID); err != nil {
+			return nil, fmt.Errorf("failed to remove key from old priority list: %w", err)
+		}
+		if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, priority), 0, key.ID); err != nil {
+			return nil, fmt.Errorf("failed to prepare new priority list: %w", err)
+		}
+		if err := p.store.LPush(activeKeysPriorityListKey(key.GroupID, priority), key.ID); err != nil {
+			return nil, fmt.Errorf("failed to push key into new priority list: %w", err)
+		}
+	}
+
+	if err := p.syncGroupPriorityOrder(key.GroupID); err != nil {
+		return nil, err
+	}
+
+	return &key, nil
+}
+
+func (p *KeyProvider) UpdateKeyMeta(keyID uint, update KeyMetaUpdate) (*models.APIKey, error) {
+	var key models.APIKey
+	var oldPriority int
+	var priorityChanged bool
+
+	err := p.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&key, keyID).Error; err != nil {
+			return err
+		}
+
+		oldPriority = normalizePriority(key.Priority)
+		updates := make(map[string]any)
+
+		if update.Notes != nil {
+			updates["notes"] = *update.Notes
+			key.Notes = *update.Notes
+		}
+		if update.Priority != nil {
+			nextPriority := normalizePriority(*update.Priority)
+			updates["priority"] = nextPriority
+			key.Priority = nextPriority
+			priorityChanged = oldPriority != nextPriority
+		}
+		if update.Config != nil {
+			updates["config"] = *update.Config
+			key.Config = *update.Config
+		}
+		if update.ProbeParamOverrides != nil {
+			updates["probe_param_overrides"] = *update.ProbeParamOverrides
+			key.ProbeParamOverrides = *update.ProbeParamOverrides
+		}
+
+		if len(updates) == 0 {
+			return nil
+		}
+
+		if err := tx.Model(&key).Updates(updates).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if update.Priority != nil {
+		storeUpdates := map[string]any{"priority": normalizePriority(*update.Priority)}
+		if err := p.store.HSet(fmt.Sprintf("key:%d", key.ID), storeUpdates); err != nil {
+			return nil, fmt.Errorf("failed to update key priority in store: %w", err)
+		}
+
+		if key.Status == models.KeyStatusActive && priorityChanged {
+			if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, oldPriority), 0, key.ID); err != nil {
+				return nil, fmt.Errorf("failed to remove key from old priority list: %w", err)
+			}
+			if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, key.Priority), 0, key.ID); err != nil {
+				return nil, fmt.Errorf("failed to prepare new priority list: %w", err)
+			}
+			if err := p.store.LPush(activeKeysPriorityListKey(key.GroupID, key.Priority), key.ID); err != nil {
+				return nil, fmt.Errorf("failed to push key into new priority list: %w", err)
+			}
+		}
+
+		if err := p.syncGroupPriorityOrder(key.GroupID); err != nil {
+			return nil, err
+		}
+	}
+
+	return &key, nil
+}
+
+func (p *KeyProvider) MarkKeyValidated(keyID uint, validatedAt time.Time) error {
+	return p.db.Model(&models.APIKey{}).Where("id = ?", keyID).Update("last_validated_at", validatedAt).Error
+}
+
+func (p *KeyProvider) UpdateProbeStatus(apiKey *models.APIKey, update ProbeStatusUpdate, shouldBlacklist bool, shouldRestore bool) error {
+	keyHashKey := fmt.Sprintf("key:%d", apiKey.ID)
+
+	return p.executeTransactionWithRetry(func(tx *gorm.DB) error {
+		var key models.APIKey
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&key, apiKey.ID).Error; err != nil {
+			return fmt.Errorf("failed to lock key %d for probe update: %w", apiKey.ID, err)
+		}
+
+		key.Priority = normalizePriority(key.Priority)
+		statusChanged := false
+		restoreToActive := false
+		moveToInvalid := false
+
+		updates := map[string]any{
+			"last_probe_at":          update.CheckedAt,
+			"last_probe_success":     update.Success,
+			"last_probe_status_code": update.StatusCode,
+			"last_probe_error":       update.ErrorMessage,
+			"probe_failure_rate":     update.FailureRate,
+			"probe_sample_count":     update.SampleCount,
+		}
+
+		if shouldRestore && key.Status != models.KeyStatusActive {
+			updates["status"] = models.KeyStatusActive
+			updates["failure_count"] = 0
+			restoreToActive = true
+			statusChanged = true
+		} else if shouldBlacklist && key.Status == models.KeyStatusActive {
+			updates["status"] = models.KeyStatusInvalid
+			moveToInvalid = true
+			statusChanged = true
+		}
+
+		if err := tx.Model(&key).Updates(updates).Error; err != nil {
+			return fmt.Errorf("failed to update probe status in DB: %w", err)
+		}
+
+		if statusChanged {
+			storeUpdates := map[string]any{"status": updates["status"]}
+			if restoreToActive {
+				storeUpdates["failure_count"] = 0
+			}
+			if err := p.store.HSet(keyHashKey, storeUpdates); err != nil {
+				return fmt.Errorf("failed to update key status in store: %w", err)
+			}
+		}
+
+		if restoreToActive {
+			if err := p.addActiveKeyToLists(key.GroupID, key.ID, key.Priority); err != nil {
+				return fmt.Errorf("failed to restore key to active lists after probe: %w", err)
+			}
+		}
+		if moveToInvalid {
+			if err := p.removeActiveKeyFromLists(key.GroupID, key.ID, key.Priority); err != nil {
+				return fmt.Errorf("failed to remove key from active lists after probe: %w", err)
+			}
+		}
+
+		return nil
+	})
 }
 
 // executeTransactionWithRetry wraps a database transaction with a retry mechanism.
@@ -139,7 +498,7 @@ func (p *KeyProvider) executeTransactionWithRetry(operation func(tx *gorm.DB) er
 	return err
 }
 
-func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey, activeKeysListKey string) error {
+func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 	keyDetails, err := p.store.HGetAll(keyHashKey)
 	if err != nil {
 		return fmt.Errorf("failed to get key details from store: %w", err)
@@ -147,6 +506,8 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey, activeKeysListKey st
 
 	failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
 	isActive := keyDetails["status"] == models.KeyStatusActive
+	priority, _ := strconv.Atoi(keyDetails["priority"])
+	priority = normalizePriority(priority)
 
 	if failureCount == 0 && isActive {
 		return nil
@@ -161,6 +522,9 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey, activeKeysListKey st
 		updates := map[string]any{"failure_count": 0}
 		if !isActive {
 			updates["status"] = models.KeyStatusActive
+			for field, value := range resetProbeStatsUpdates() {
+				updates[field] = value
+			}
 		}
 
 		if err := tx.Model(&key).Updates(updates).Error; err != nil {
@@ -172,12 +536,12 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey, activeKeysListKey st
 		}
 
 		if !isActive {
-			logrus.WithField("keyID", keyID).Debug("Key has recovered and is being restored to active pool.")
-			if err := p.store.LRem(activeKeysListKey, 0, keyID); err != nil {
-				return fmt.Errorf("failed to LRem key before LPush on recovery: %w", err)
+			if err := p.clearProbeWindow(keyID); err != nil {
+				return err
 			}
-			if err := p.store.LPush(activeKeysListKey, keyID); err != nil {
-				return fmt.Errorf("failed to LPush key back to active list: %w", err)
+			logrus.WithField("keyID", keyID).Debug("Key has recovered and is being restored to active pool.")
+			if err := p.addActiveKeyToLists(key.GroupID, keyID, priority); err != nil {
+				return fmt.Errorf("failed to restore key to active lists: %w", err)
 			}
 		}
 
@@ -185,7 +549,7 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey, activeKeysListKey st
 	})
 }
 
-func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, keyHashKey, activeKeysListKey string) error {
+func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, keyHashKey string) error {
 	keyDetails, err := p.store.HGetAll(keyHashKey)
 	if err != nil {
 		return fmt.Errorf("failed to get key details from store: %w", err)
@@ -196,14 +560,18 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 	}
 
 	failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
-
-	// 获取该分组的有效配置
-	blacklistThreshold := group.EffectiveConfig.BlacklistThreshold
+	priority, _ := strconv.Atoi(keyDetails["priority"])
+	priority = normalizePriority(priority)
 
 	return p.executeTransactionWithRetry(func(tx *gorm.DB) error {
 		var key models.APIKey
 		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&key, apiKey.ID).Error; err != nil {
 			return fmt.Errorf("failed to lock key %d for update: %w", apiKey.ID, err)
+		}
+
+		blacklistThreshold := group.EffectiveConfig.BlacklistThreshold
+		if p.settingsManager != nil {
+			blacklistThreshold = p.settingsManager.GetEffectiveKeyConfig(group.Config, key.Config).BlacklistThreshold
 		}
 
 		newFailureCount := failureCount + 1
@@ -224,8 +592,8 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 
 		if shouldBlacklist {
 			logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "threshold": blacklistThreshold}).Warn("Key has reached blacklist threshold, disabling.")
-			if err := p.store.LRem(activeKeysListKey, 0, apiKey.ID); err != nil {
-				return fmt.Errorf("failed to LRem key from active list: %w", err)
+			if err := p.removeActiveKeyFromLists(group.ID, apiKey.ID, priority); err != nil {
+				return fmt.Errorf("failed to remove key from active lists: %w", err)
 			}
 			if err := p.store.HSet(keyHashKey, map[string]any{"status": models.KeyStatusInvalid}); err != nil {
 				return fmt.Errorf("failed to update key status to invalid in store: %w", err)
@@ -242,6 +610,8 @@ func (p *KeyProvider) LoadKeysFromDB() error {
 
 	// 1. 分批从数据库加载并使用 Pipeline 写入 Redis
 	allActiveKeyIDs := make(map[uint][]any)
+	allActiveKeyIDsByPriority := make(map[uint]map[int][]any)
+	allGroupPriorities := make(map[uint]map[int]struct{})
 	batchSize := 10000
 	var batchKeys []*models.APIKey
 
@@ -254,6 +624,7 @@ func (p *KeyProvider) LoadKeysFromDB() error {
 		}
 
 		for _, key := range batchKeys {
+			key.Priority = normalizePriority(key.Priority)
 			keyHashKey := fmt.Sprintf("key:%d", key.ID)
 			keyDetails := p.apiKeyToMap(key)
 
@@ -265,8 +636,17 @@ func (p *KeyProvider) LoadKeysFromDB() error {
 				}
 			}
 
+			if _, ok := allGroupPriorities[key.GroupID]; !ok {
+				allGroupPriorities[key.GroupID] = make(map[int]struct{})
+			}
+			allGroupPriorities[key.GroupID][key.Priority] = struct{}{}
+
 			if key.Status == models.KeyStatusActive {
 				allActiveKeyIDs[key.GroupID] = append(allActiveKeyIDs[key.GroupID], key.ID)
+				if _, ok := allActiveKeyIDsByPriority[key.GroupID]; !ok {
+					allActiveKeyIDsByPriority[key.GroupID] = make(map[int][]any)
+				}
+				allActiveKeyIDsByPriority[key.GroupID][key.Priority] = append(allActiveKeyIDsByPriority[key.GroupID][key.Priority], key.ID)
 			}
 		}
 
@@ -286,11 +666,45 @@ func (p *KeyProvider) LoadKeysFromDB() error {
 	logrus.Info("Updating active key lists for all groups...")
 	for groupID, activeIDs := range allActiveKeyIDs {
 		if len(activeIDs) > 0 {
-			activeKeysListKey := fmt.Sprintf("group:%d:active_keys", groupID)
-			p.store.Delete(activeKeysListKey)
-			if err := p.store.LPush(activeKeysListKey, activeIDs...); err != nil {
+			listKey := activeKeysListKey(groupID)
+			p.store.Delete(listKey)
+			if err := p.store.LPush(listKey, activeIDs...); err != nil {
 				logrus.WithFields(logrus.Fields{"groupID": groupID, "error": err}).Error("Failed to LPush active keys for group")
 			}
+		}
+	}
+
+	for groupID, priorityMap := range allActiveKeyIDsByPriority {
+		for priority, activeIDs := range priorityMap {
+			if len(activeIDs) == 0 {
+				continue
+			}
+			listKey := activeKeysPriorityListKey(groupID, priority)
+			p.store.Delete(listKey)
+			if err := p.store.LPush(listKey, activeIDs...); err != nil {
+				logrus.WithFields(logrus.Fields{
+					"groupID":  groupID,
+					"priority": priority,
+					"error":    err,
+				}).Error("Failed to LPush active priority keys for group")
+			}
+		}
+	}
+
+	for groupID, priorities := range allGroupPriorities {
+		items := make([]int, 0, len(priorities))
+		for priority := range priorities {
+			items = append(items, priority)
+		}
+		sort.Ints(items)
+
+		parts := make([]string, 0, len(items))
+		for _, priority := range items {
+			parts = append(parts, strconv.Itoa(priority))
+		}
+
+		if err := p.store.Set(groupPriorityOrderKey(groupID), []byte(strings.Join(parts, ",")), 0); err != nil {
+			logrus.WithFields(logrus.Fields{"groupID": groupID, "error": err}).Error("Failed to update group priority order")
 		}
 	}
 
@@ -303,6 +717,10 @@ func (p *KeyProvider) AddKeys(groupID uint, keys []models.APIKey) error {
 		return nil
 	}
 
+	for i := range keys {
+		keys[i].Priority = normalizePriority(keys[i].Priority)
+	}
+
 	err := p.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&keys).Error; err != nil {
 			return err
@@ -312,7 +730,11 @@ func (p *KeyProvider) AddKeys(groupID uint, keys []models.APIKey) error {
 		return p.addKeysToCacheBatch(groupID, keys)
 	})
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	return p.syncGroupPriorityOrder(groupID)
 }
 
 // RemoveKeys 批量从池和数据库中移除 Key。
@@ -354,7 +776,7 @@ func (p *KeyProvider) RemoveKeys(groupID uint, keyValues []string) (int64, error
 		deletedCount = result.RowsAffected
 
 		for _, key := range keysToDelete {
-			if err := p.removeKeyFromStore(key.ID, key.GroupID); err != nil {
+			if err := p.removeKeyFromStore(&key); err != nil {
 				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to remove key from store after DB deletion, rolling back transaction")
 				return err
 			}
@@ -363,7 +785,11 @@ func (p *KeyProvider) RemoveKeys(groupID uint, keyValues []string) (int64, error
 		return nil
 	})
 
-	return deletedCount, err
+	if err != nil {
+		return deletedCount, err
+	}
+
+	return deletedCount, p.syncGroupPriorityOrder(groupID)
 }
 
 // RestoreKeys 恢复组内所有无效的 Key。
@@ -381,8 +807,10 @@ func (p *KeyProvider) RestoreKeys(groupID uint) (int64, error) {
 		}
 
 		updates := map[string]any{
-			"status":        models.KeyStatusActive,
-			"failure_count": 0,
+			"status":             models.KeyStatusActive,
+			"failure_count":      0,
+			"probe_failure_rate": 0,
+			"probe_sample_count": 0,
 		}
 		result := tx.Model(&models.APIKey{}).Where("group_id = ? AND status = ?", groupID, models.KeyStatusInvalid).Updates(updates)
 		if result.Error != nil {
@@ -395,6 +823,10 @@ func (p *KeyProvider) RestoreKeys(groupID uint) (int64, error) {
 			key.FailureCount = 0
 			if err := p.addKeyToStore(&key); err != nil {
 				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to restore key in store after DB update, rolling back transaction")
+				return err
+			}
+			if err := p.clearProbeWindow(key.ID); err != nil {
+				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to clear probe window after restoring key, rolling back transaction")
 				return err
 			}
 		}
@@ -437,8 +869,10 @@ func (p *KeyProvider) RestoreMultipleKeys(groupID uint, keyValues []string) (int
 		keyIDsToRestore := pluckIDs(keysToRestore)
 
 		updates := map[string]any{
-			"status":        models.KeyStatusActive,
-			"failure_count": 0,
+			"status":             models.KeyStatusActive,
+			"failure_count":      0,
+			"probe_failure_rate": 0,
+			"probe_sample_count": 0,
 		}
 		result := tx.Model(&models.APIKey{}).Where("id IN ?", keyIDsToRestore).Updates(updates)
 		if result.Error != nil {
@@ -451,6 +885,10 @@ func (p *KeyProvider) RestoreMultipleKeys(groupID uint, keyValues []string) (int
 			key.FailureCount = 0
 			if err := p.addKeyToStore(&key); err != nil {
 				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to restore key in store after DB update")
+				return err
+			}
+			if err := p.clearProbeWindow(key.ID); err != nil {
+				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to clear probe window after restoring key")
 				return err
 			}
 		}
@@ -502,7 +940,7 @@ func (p *KeyProvider) removeKeysByStatus(groupID uint, status ...string) (int64,
 		removedCount = result.RowsAffected
 
 		for _, key := range keysToRemove {
-			if err := p.removeKeyFromStore(key.ID, key.GroupID); err != nil {
+			if err := p.removeKeyFromStore(&key); err != nil {
 				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to remove key from store after DB deletion, rolling back transaction")
 				return err
 			}
@@ -510,7 +948,11 @@ func (p *KeyProvider) removeKeysByStatus(groupID uint, status ...string) (int64,
 		return nil
 	})
 
-	return removedCount, err
+	if err != nil {
+		return removedCount, err
+	}
+
+	return removedCount, p.syncGroupPriorityOrder(groupID)
 }
 
 // RemoveKeysFromStore 直接从内存存储中移除指定的键，不涉及数据库操作
@@ -552,6 +994,8 @@ func (p *KeyProvider) RemoveKeysFromStore(groupID uint, keyIDs []uint) error {
 
 // addKeyToStore is a helper to add a single key to the cache.
 func (p *KeyProvider) addKeyToStore(key *models.APIKey) error {
+	key.Priority = normalizePriority(key.Priority)
+
 	// 1. Store key details in HASH
 	keyHashKey := fmt.Sprintf("key:%d", key.ID)
 	keyDetails := p.apiKeyToMap(key)
@@ -561,12 +1005,8 @@ func (p *KeyProvider) addKeyToStore(key *models.APIKey) error {
 
 	// 2. If active, add to the active LIST
 	if key.Status == models.KeyStatusActive {
-		activeKeysListKey := fmt.Sprintf("group:%d:active_keys", key.GroupID)
-		if err := p.store.LRem(activeKeysListKey, 0, key.ID); err != nil {
-			return fmt.Errorf("failed to LRem key %d before LPush for group %d: %w", key.ID, key.GroupID, err)
-		}
-		if err := p.store.LPush(activeKeysListKey, key.ID); err != nil {
-			return fmt.Errorf("failed to LPush key %d to group %d: %w", key.ID, key.GroupID, err)
+		if err := p.addActiveKeyToLists(key.GroupID, key.ID, key.Priority); err != nil {
+			return fmt.Errorf("failed to add key %d to active lists for group %d: %w", key.ID, key.GroupID, err)
 		}
 	}
 	return nil
@@ -600,30 +1040,42 @@ func (p *KeyProvider) addKeysToCacheBatch(groupID uint, keys []models.APIKey) er
 	}
 
 	// 2. 收集所有密钥 ID
-	activeKeysListKey := fmt.Sprintf("group:%d:active_keys", groupID)
-	activeKeyIDs := make([]any, len(keys))
+	activeKeyIDs := make([]any, 0, len(keys))
+	activeKeyIDsByPriority := make(map[int][]any)
 	for i := range keys {
-		activeKeyIDs[i] = keys[i].ID
+		keys[i].Priority = normalizePriority(keys[i].Priority)
+		if keys[i].Status != models.KeyStatusActive {
+			continue
+		}
+		activeKeyIDs = append(activeKeyIDs, keys[i].ID)
+		activeKeyIDsByPriority[keys[i].Priority] = append(activeKeyIDsByPriority[keys[i].Priority], keys[i].ID)
 	}
 
-	// 3. 批量 LPush 活跃密钥
-	if err := p.store.LPush(activeKeysListKey, activeKeyIDs...); err != nil {
-		return fmt.Errorf("failed to batch LPush keys to group %d: %w", groupID, err)
+	if len(activeKeyIDs) > 0 {
+		if err := p.store.LPush(activeKeysListKey(groupID), activeKeyIDs...); err != nil {
+			return fmt.Errorf("failed to batch LPush keys to group %d: %w", groupID, err)
+		}
+	}
+
+	for priority, keyIDs := range activeKeyIDsByPriority {
+		if err := p.store.LPush(activeKeysPriorityListKey(groupID, priority), keyIDs...); err != nil {
+			return fmt.Errorf("failed to batch LPush keys to group %d priority %d: %w", groupID, priority, err)
+		}
 	}
 
 	return nil
 }
 
 // removeKeyFromStore is a helper to remove a single key from the cache.
-func (p *KeyProvider) removeKeyFromStore(keyID, groupID uint) error {
-	activeKeysListKey := fmt.Sprintf("group:%d:active_keys", groupID)
-	if err := p.store.LRem(activeKeysListKey, 0, keyID); err != nil {
-		logrus.WithFields(logrus.Fields{"keyID": keyID, "groupID": groupID, "error": err}).Error("Failed to LRem key from active list")
+func (p *KeyProvider) removeKeyFromStore(key *models.APIKey) error {
+	key.Priority = normalizePriority(key.Priority)
+	if err := p.removeActiveKeyFromLists(key.GroupID, key.ID, key.Priority); err != nil {
+		logrus.WithFields(logrus.Fields{"keyID": key.ID, "groupID": key.GroupID, "error": err}).Error("Failed to remove key from active list")
 	}
 
-	keyHashKey := fmt.Sprintf("key:%d", keyID)
+	keyHashKey := fmt.Sprintf("key:%d", key.ID)
 	if err := p.store.Delete(keyHashKey); err != nil {
-		return fmt.Errorf("failed to delete key HASH for key %d: %w", keyID, err)
+		return fmt.Errorf("failed to delete key HASH for key %d: %w", key.ID, err)
 	}
 	return nil
 }
@@ -634,6 +1086,7 @@ func (p *KeyProvider) apiKeyToMap(key *models.APIKey) map[string]any {
 		"id":            fmt.Sprint(key.ID),
 		"key_string":    key.KeyValue,
 		"status":        key.Status,
+		"priority":      normalizePriority(key.Priority),
 		"failure_count": key.FailureCount,
 		"group_id":      key.GroupID,
 		"created_at":    key.CreatedAt.Unix(),

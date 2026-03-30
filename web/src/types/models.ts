@@ -19,11 +19,21 @@ export interface APIKey {
   id: number;
   group_id: number;
   key_value: string;
+  priority: number;
   notes?: string;
+  config: Record<string, unknown>;
+  probe_param_overrides: Record<string, unknown>;
   status: KeyStatus;
   request_count: number;
   failure_count: number;
   last_used_at?: string;
+  last_validated_at?: string;
+  last_probe_at?: string;
+  last_probe_success: boolean;
+  last_probe_status_code: number;
+  last_probe_error?: string;
+  probe_failure_rate: number;
+  probe_sample_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -76,6 +86,7 @@ export interface Group {
   api_keys?: APIKey[];
   endpoint?: string;
   param_overrides: Record<string, unknown>;
+  probe_param_overrides: Record<string, unknown>;
   model_redirect_rules: Record<string, string>;
   model_redirect_strict: boolean;
   header_rules?: HeaderRule[];
@@ -91,7 +102,7 @@ export interface GroupConfigOption {
   key: string;
   name: string;
   description: string;
-  default_value: string | number;
+  default_value: string | number | boolean;
 }
 
 // GroupStatsResponse defines the complete statistics for a group.
@@ -159,7 +170,7 @@ export interface RequestLog {
   duration_ms: number;
   error_message: string;
   user_agent: string;
-  request_type: "retry" | "final";
+  request_type: "retry" | "final" | "probe";
   group_name?: string;
   parent_group_name?: string;
   key_value?: string;
@@ -184,6 +195,7 @@ export interface LogsResponse {
 export interface LogFilter {
   page?: number;
   page_size?: number;
+  hide_probe?: boolean;
   group_name?: string;
   parent_group_name?: string;
   key_value?: string;
@@ -194,7 +206,7 @@ export interface LogFilter {
   error_contains?: string;
   start_time?: string | null;
   end_time?: string | null;
-  request_type?: "retry" | "final";
+  request_type?: "retry" | "final" | "probe";
 }
 
 export interface DashboardStats {

@@ -17,14 +17,15 @@ export interface VersionInfo {
   status: "checking" | "latest" | "update-available" | "error";
 }
 
-const CACHE_KEY = "gpt-load-version-info";
+const CACHE_KEY = "gpt-load-version-info-yatotm-gpt-load";
 const CACHE_DURATION = 30 * 60 * 1000;
+const RELEASES_API_URL = "https://api.github.com/repos/yatotm/gpt-load/releases/latest";
 
 class VersionService {
   private currentVersion: string;
 
   constructor() {
-    this.currentVersion = import.meta.env.VITE_VERSION || "1.0.0";
+    this.currentVersion = import.meta.env.VITE_VERSION || "v2.0.0";
   }
 
   /**
@@ -98,7 +99,7 @@ class VersionService {
   private async fetchLatestVersion(): Promise<GitHubRelease | null> {
     try {
       const response = await axios.get(
-        "https://api.github.com/repos/tbphp/gpt-load/releases/latest",
+        RELEASES_API_URL,
         {
           timeout: 10000,
           headers: {
