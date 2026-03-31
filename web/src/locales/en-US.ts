@@ -517,6 +517,7 @@ export default {
     statusCode: "Status Code",
     duration: "Duration(ms)",
     model: "Model",
+    keyNote: "Note",
     sourceIP: "Source IP",
     groupName: "Group Name",
     parentGroup: "Aggregate Group",

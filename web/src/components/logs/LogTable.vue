@@ -219,7 +219,11 @@ const loadColumnPreferences = () => {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved) {
     try {
-      visibleColumns.value = JSON.parse(saved);
+      const parsed = JSON.parse(saved);
+      visibleColumns.value = Array.isArray(parsed) ? parsed.filter(item => typeof item === "string") : [];
+      if (!visibleColumns.value.includes("key_note")) {
+        visibleColumns.value.push("key_note");
+      }
     } catch {
       // If parse fails, use defaults
       setDefaultColumns();
@@ -327,6 +331,14 @@ const allColumnConfigs: ColumnConfig[] = [
     width: 240,
     defaultVisible: true,
     required: true, // 必选字段
+  },
+  {
+    key: "key_note",
+    title: t("logs.keyNote"),
+    width: 220,
+    defaultVisible: true,
+    render: (row: LogRow) =>
+      h(NEllipsis, { style: "max-width: 200px" }, { default: () => row.key_note || "-" }),
   },
   {
     key: "key_value",
@@ -798,6 +810,10 @@ const deselectAllColumns = () => {
               <div class="detail-item-compact">
                 <span class="detail-label-compact">{{ t("logs.model") }}:</span>
                 <span class="detail-value-compact">{{ selectedLog.model }}</span>
+              </div>
+              <div class="detail-item-compact">
+                <span class="detail-label-compact">{{ t("logs.keyNote") }}:</span>
+                <span class="detail-value-compact">{{ selectedLog.key_note || "-" }}</span>
               </div>
               <div class="detail-item-compact">
                 <span class="detail-label-compact">{{ t("logs.requestType") }}:</span>

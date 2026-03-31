@@ -519,6 +519,7 @@ export default {
     statusCode: "ステータスコード",
     duration: "所要時間(ms)",
     model: "モデル",
+    keyNote: "備考",
     sourceIP: "ソースIP",
     groupName: "グループ名",
     parentGroup: "集約グループ",

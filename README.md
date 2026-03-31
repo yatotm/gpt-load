@@ -54,7 +54,7 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    yatotm1994/gpt-load:v2.0.1
+    yatotm1994/gpt-load:v2.0.2
 ```
 
 > Please change `your-secure-key-here` to a strong password (never use the default value), then you can log in to the management interface: <http://localhost:3001>

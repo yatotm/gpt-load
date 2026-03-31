@@ -174,6 +174,7 @@ export interface RequestLog {
   group_name?: string;
   parent_group_name?: string;
   key_value?: string;
+  key_note?: string;
   model: string;
   upstream_addr: string;
   is_stream: boolean;

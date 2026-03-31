@@ -91,7 +91,17 @@ func (s *LogService) logFiltersScope(c *gin.Context) func(db *gorm.DB) *gorm.DB 
 
 // GetLogsQuery returns a GORM query for fetching logs with filters.
 func (s *LogService) GetLogsQuery(c *gin.Context) *gorm.DB {
-	return s.DB.Model(&models.RequestLog{}).Scopes(s.logFiltersScope(c))
+	keyNotesQuery := s.DB.Model(&models.APIKey{}).
+		Select("group_id, key_hash, MAX(notes) AS notes").
+		Group("group_id, key_hash")
+
+	return s.DB.Model(&models.RequestLog{}).
+		Select("request_logs.*, COALESCE(api_key_notes.notes, '') AS key_note").
+		Joins(
+			"LEFT JOIN (?) AS api_key_notes ON api_key_notes.group_id = request_logs.group_id AND api_key_notes.key_hash = request_logs.key_hash",
+			keyNotesQuery,
+		).
+		Scopes(s.logFiltersScope(c))
 }
 
 // StreamLogKeysToCSV fetches unique keys from logs based on filters and streams them as a CSV.

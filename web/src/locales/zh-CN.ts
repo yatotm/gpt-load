@@ -500,6 +500,7 @@ export default {
     statusCode: "状态码",
     duration: "耗时(ms)",
     model: "模型",
+    keyNote: "备注",
     sourceIP: "源IP",
     groupName: "分组名",
     parentGroup: "聚合分组",

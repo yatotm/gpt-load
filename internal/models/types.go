@@ -172,6 +172,7 @@ type RequestLog struct {
 	ParentGroupName string    `gorm:"type:varchar(255);index" json:"parent_group_name"`
 	KeyValue        string    `gorm:"type:text" json:"key_value"`
 	KeyHash         string    `gorm:"type:varchar(128);index" json:"key_hash"`
+	KeyNote         string    `gorm:"->;-:migration;column:key_note" json:"key_note"`
 	Model           string    `gorm:"type:varchar(255);index" json:"model"`
 	IsSuccess       bool      `gorm:"not null" json:"is_success"`
 	SourceIP        string    `gorm:"type:varchar(64)" json:"source_ip"`
