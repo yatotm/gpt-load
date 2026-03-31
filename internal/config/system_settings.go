@@ -455,6 +455,7 @@ func (sm *SystemSettingsManager) DisplaySystemConfig(settings types.SystemSettin
 	logrus.Infof("    Request Timeout: %d seconds", settings.RequestTimeout)
 	logrus.Infof("    Connect Timeout: %d seconds", settings.ConnectTimeout)
 	logrus.Infof("    Response Header Timeout: %d seconds", settings.ResponseHeaderTimeout)
+	logrus.Infof("    Stream First Visible Output Timeout: %d seconds", settings.StreamFirstVisibleTimeoutSeconds)
 	logrus.Infof("    Idle Connection Timeout: %d seconds", settings.IdleConnTimeout)
 	logrus.Infof("    Max Idle Connections: %d", settings.MaxIdleConns)
 	logrus.Infof("    Max Idle Connections Per Host: %d", settings.MaxIdleConnsPerHost)

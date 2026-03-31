@@ -27,25 +27,26 @@ type SystemSetting struct {
 
 // GroupConfig 存储特定于分组的配置
 type GroupConfig struct {
-	RequestTimeout               *int    `json:"request_timeout,omitempty"`
-	IdleConnTimeout              *int    `json:"idle_conn_timeout,omitempty"`
-	ConnectTimeout               *int    `json:"connect_timeout,omitempty"`
-	MaxIdleConns                 *int    `json:"max_idle_conns,omitempty"`
-	MaxIdleConnsPerHost          *int    `json:"max_idle_conns_per_host,omitempty"`
-	ResponseHeaderTimeout        *int    `json:"response_header_timeout,omitempty"`
-	ProxyURL                     *string `json:"proxy_url,omitempty"`
-	MaxRetries                   *int    `json:"max_retries,omitempty"`
-	BlacklistThreshold           *int    `json:"blacklist_threshold,omitempty"`
-	KeyValidationIntervalMinutes *int    `json:"key_validation_interval_minutes,omitempty"`
-	KeyValidationConcurrency     *int    `json:"key_validation_concurrency,omitempty"`
-	KeyValidationTimeoutSeconds  *int    `json:"key_validation_timeout_seconds,omitempty"`
-	ActiveProbeEnabled           *bool   `json:"active_probe_enabled,omitempty"`
-	ActiveProbeIntervalSeconds   *int    `json:"active_probe_interval_seconds,omitempty"`
-	ActiveProbeTimeoutSeconds    *int    `json:"active_probe_timeout_seconds,omitempty"`
-	ActiveProbeWindowMinutes     *int    `json:"active_probe_window_minutes,omitempty"`
-	ActiveProbeFailureRateLimit  *int    `json:"active_probe_failure_rate_limit,omitempty"`
-	ActiveProbeIdlePeriods       *string `json:"active_probe_idle_periods,omitempty" name:"config.active_probe_idle_periods" desc:"config.active_probe_idle_periods_desc"`
-	EnableRequestBodyLogging     *bool   `json:"enable_request_body_logging,omitempty"`
+	RequestTimeout                   *int    `json:"request_timeout,omitempty"`
+	IdleConnTimeout                  *int    `json:"idle_conn_timeout,omitempty"`
+	ConnectTimeout                   *int    `json:"connect_timeout,omitempty"`
+	MaxIdleConns                     *int    `json:"max_idle_conns,omitempty"`
+	MaxIdleConnsPerHost              *int    `json:"max_idle_conns_per_host,omitempty"`
+	ResponseHeaderTimeout            *int    `json:"response_header_timeout,omitempty"`
+	StreamFirstVisibleTimeoutSeconds *int    `json:"stream_first_visible_timeout_seconds,omitempty"`
+	ProxyURL                         *string `json:"proxy_url,omitempty"`
+	MaxRetries                       *int    `json:"max_retries,omitempty"`
+	BlacklistThreshold               *int    `json:"blacklist_threshold,omitempty"`
+	KeyValidationIntervalMinutes     *int    `json:"key_validation_interval_minutes,omitempty"`
+	KeyValidationConcurrency         *int    `json:"key_validation_concurrency,omitempty"`
+	KeyValidationTimeoutSeconds      *int    `json:"key_validation_timeout_seconds,omitempty"`
+	ActiveProbeEnabled               *bool   `json:"active_probe_enabled,omitempty"`
+	ActiveProbeIntervalSeconds       *int    `json:"active_probe_interval_seconds,omitempty"`
+	ActiveProbeTimeoutSeconds        *int    `json:"active_probe_timeout_seconds,omitempty"`
+	ActiveProbeWindowMinutes         *int    `json:"active_probe_window_minutes,omitempty"`
+	ActiveProbeFailureRateLimit      *int    `json:"active_probe_failure_rate_limit,omitempty"`
+	ActiveProbeIdlePeriods           *string `json:"active_probe_idle_periods,omitempty" name:"config.active_probe_idle_periods" desc:"config.active_probe_idle_periods_desc"`
+	EnableRequestBodyLogging         *bool   `json:"enable_request_body_logging,omitempty"`
 }
 
 // KeyConfig 存储仅对单个密钥生效的配置覆盖。

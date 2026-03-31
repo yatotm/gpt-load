@@ -54,7 +54,7 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    yatotm1994/gpt-load:v2.0.2
+    yatotm1994/gpt-load:v2.0.3
 ```
 
 > Please change `your-secure-key-here` to a strong password (never use the default value), then you can log in to the management interface: <http://localhost:3001>
@@ -282,6 +282,7 @@ Supported Proxy Protocol Formats:
 | Connection Timeout            | `connect_timeout`         | 15      | ✅             | Timeout for establishing connection with upstream service (seconds) |
 | Idle Connection Timeout       | `idle_conn_timeout`       | 120     | ✅             | HTTP client idle connection timeout (seconds)                       |
 | Response Header Timeout       | `response_header_timeout` | 600     | ✅             | Timeout for waiting upstream response headers (seconds)             |
+| Stream First Visible Output Timeout | `stream_first_visible_timeout_seconds` | 180 | ✅ | Max wait for the first visible streaming output. Heartbeats and blank SSE frames do not count; if nothing has been sent to the client yet, GPT-Load retries. |
 | Max Idle Connections          | `max_idle_conns`          | 100     | ✅             | Connection pool maximum total idle connections                      |
 | Max Idle Connections Per Host | `max_idle_conns_per_host` | 50      | ✅             | Maximum idle connections per upstream host                          |
 | Proxy URL                     | `proxy_url`               | -       | ✅             | HTTP/HTTPS proxy for forwarding requests, uses environment if empty |

@@ -142,13 +142,21 @@ func (ps *ProxyServer) executeRequestWithRetry(
 
 	var ctx context.Context
 	var cancel context.CancelFunc
+	var streamStartGuard *streamStartGuard
 	if isStream {
 		ctx, cancel = context.WithCancel(c.Request.Context())
+		streamStartGuard = newStreamStartGuard(
+			time.Duration(cfg.StreamFirstVisibleTimeoutSeconds)*time.Second,
+			cancel,
+		)
 	} else {
 		timeout := time.Duration(cfg.RequestTimeout) * time.Second
 		ctx, cancel = context.WithTimeout(c.Request.Context(), timeout)
 	}
 	defer cancel()
+	if streamStartGuard != nil {
+		defer streamStartGuard.Stop()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, c.Request.Method, upstreamURL, bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -199,10 +207,13 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	if resp != nil {
 		defer resp.Body.Close()
 	}
+	if streamStartGuard != nil && streamStartGuard.TimedOut() {
+		err = newStreamFirstVisibleTimeoutError(streamStartGuard.Timeout())
+	}
 
 	// Unified error handling for retries. Exclude 404 from being a retryable error.
 	if err != nil || (resp != nil && resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound) {
-		if err != nil && app_errors.IsIgnorableError(err) {
+		if err != nil && !isStreamFirstVisibleTimeoutError(err) && app_errors.IsIgnorableError(err) {
 			logrus.Debugf("Client-side ignorable error for key %s, aborting retries: %v", utils.MaskAPIKey(apiKey.KeyValue), err)
 			ps.logRequest(c, originalGroup, group, apiKey, startTime, 499, err, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
 			return
@@ -213,7 +224,10 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		var parsedError string
 
 		if err != nil {
-			statusCode = 500
+			statusCode = http.StatusInternalServerError
+			if isStreamFirstVisibleTimeoutError(err) {
+				statusCode = http.StatusGatewayTimeout
+			}
 			errorMessage = err.Error()
 			parsedError = errorMessage
 			logrus.Debugf("Request failed (attempt %d/%d) for key %s: %v", retryCount+1, cfg.MaxRetries, utils.MaskAPIKey(apiKey.KeyValue), err)
@@ -266,16 +280,43 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	if shouldInterceptModelList(c.Request.URL.Path, c.Request.Method) {
 		ps.handleModelListResponse(c, resp, group, channelHandler)
 	} else {
-		for key, values := range resp.Header {
-			for _, value := range values {
-				c.Header(key, value)
-			}
-		}
-		c.Status(resp.StatusCode)
-
 		if isStream {
-			ps.handleStreamingResponse(c, resp)
+			streamResult := ps.handleStreamingResponse(c, resp, streamStartGuard)
+			if streamResult.Err != nil {
+				if app_errors.IsIgnorableError(streamResult.Err) {
+					ps.logRequest(c, originalGroup, group, apiKey, startTime, 499, streamResult.Err, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+					return
+				}
+				if streamResult.Retryable {
+					ps.keyProvider.UpdateStatus(apiKey, group, false, streamResult.Err.Error())
+					statusCode := streamRetryableStatusCode(streamResult.Err)
+
+					isLastAttempt := retryCount >= cfg.MaxRetries
+					requestType := models.RequestTypeRetry
+					if isLastAttempt {
+						requestType = models.RequestTypeFinal
+					}
+
+					ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, streamResult.Err, isStream, upstreamURL, channelHandler, bodyBytes, requestType)
+
+					if isLastAttempt {
+						response.Error(c, app_errors.NewAPIErrorWithUpstream(statusCode, "UPSTREAM_TIMEOUT", streamResult.Err.Error()))
+						return
+					}
+
+					ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, bodyBytes, isStream, startTime, retryCount+1)
+					return
+				}
+
+				statusCode := resp.StatusCode
+				if app_errors.IsIgnorableError(streamResult.Err) {
+					statusCode = 499
+				}
+				ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, streamResult.Err, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+				return
+			}
 		} else {
+			ps.writeResponseHeaders(c, resp)
 			ps.handleNormalResponse(c, resp)
 		}
 	}
