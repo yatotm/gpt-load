@@ -27,10 +27,16 @@ type probeWindowEntry struct {
 	Success   bool  `json:"success"`
 }
 
+type probeWindowState struct {
+	StartedAt int64              `json:"started_at"`
+	Entries   []probeWindowEntry `json:"entries"`
+}
+
 type probeWindowStats struct {
-	SampleCount  int64
-	FailureCount int64
-	FailureRate  float64
+	SampleCount    int64
+	FailureCount   int64
+	FailureRate    float64
+	WindowComplete bool
 }
 
 type probeJob struct {
@@ -246,9 +252,16 @@ func (s *CronChecker) probeGroupKeys(group *models.Group) {
 
 	dueJobs := make([]probeJob, 0, len(keys))
 	now := time.Now()
+	idleRanges, err := s.parseGroupIdleProbeRanges(group.Config)
+	if err != nil {
+		logrus.WithError(err).WithField("group_id", group.ID).Warn("CronChecker: invalid active probe idle periods, ignoring group idle schedule")
+		idleRanges = nil
+	}
+	inIdlePeriod := utils.IsWithinDailyTimeRanges(now, idleRanges)
+
 	for i := range keys {
 		effectiveConfig := s.SettingsManager.GetEffectiveKeyConfig(group.Config, keys[i].Config)
-		if !effectiveConfig.ActiveProbeEnabled {
+		if !shouldUseActiveProbeForKey(inIdlePeriod, keys[i].Config, effectiveConfig) {
 			continue
 		}
 
@@ -350,9 +363,7 @@ func (s *CronChecker) runSingleProbe(group *models.Group, job probeJob) {
 		logrus.WithError(err).WithField("key_id", key.ID).Warn("CronChecker: failed to update probe window")
 	}
 
-	failureRateLimit := float64(job.EffectiveConfig.ActiveProbeFailureRateLimit)
-	shouldBlacklist := stats.SampleCount > 0 && stats.FailureRate > failureRateLimit
-	shouldRestore := isValid && stats.SampleCount > 0 && stats.FailureRate <= failureRateLimit
+	decision := decideProbeStatusChange(stats, isValid, float64(job.EffectiveConfig.ActiveProbeFailureRateLimit))
 
 	if err := s.KeyProvider.UpdateProbeStatus(key, ProbeStatusUpdate{
 		CheckedAt:    checkedAt,
@@ -361,7 +372,7 @@ func (s *CronChecker) runSingleProbe(group *models.Group, job probeJob) {
 		ErrorMessage: errorMessage,
 		FailureRate:  stats.FailureRate,
 		SampleCount:  stats.SampleCount,
-	}, shouldBlacklist, shouldRestore); err != nil {
+	}, decision.ShouldBlacklist, decision.ShouldRestore); err != nil {
 		logrus.WithError(err).WithField("key_id", key.ID).Error("CronChecker: failed to update probe status")
 	}
 
@@ -379,20 +390,33 @@ func (s *CronChecker) decryptKey(key *models.APIKey) (string, error) {
 
 func (s *CronChecker) recordProbeWindow(keyID uint, windowMinutes int, success bool, now time.Time) (probeWindowStats, error) {
 	windowKey := probeWindowStoreKey(keyID)
-	var entries []probeWindowEntry
+	var state probeWindowState
 
 	raw, err := s.Store.Get(windowKey)
 	if err == nil && len(raw) > 0 {
-		if err := json.Unmarshal(raw, &entries); err != nil {
-			return probeWindowStats{}, fmt.Errorf("failed to unmarshal probe window: %w", err)
+		stateErr := json.Unmarshal(raw, &state)
+		if stateErr != nil || len(state.Entries) == 0 {
+			var legacyEntries []probeWindowEntry
+			if legacyErr := json.Unmarshal(raw, &legacyEntries); legacyErr != nil {
+				if stateErr != nil {
+					return probeWindowStats{}, fmt.Errorf("failed to unmarshal probe window: %w", stateErr)
+				}
+				return probeWindowStats{}, fmt.Errorf("failed to unmarshal probe window: %w", legacyErr)
+			}
+			state.Entries = legacyEntries
+			state.StartedAt = earliestProbeTimestamp(legacyEntries)
 		}
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return probeWindowStats{}, fmt.Errorf("failed to load probe window: %w", err)
 	}
 
+	if state.StartedAt == 0 {
+		state.StartedAt = now.Unix()
+	}
+
 	cutoff := now.Add(-time.Duration(windowMinutes) * time.Minute).Unix()
-	filtered := make([]probeWindowEntry, 0, len(entries)+1)
-	for _, entry := range entries {
+	filtered := make([]probeWindowEntry, 0, len(state.Entries)+1)
+	for _, entry := range state.Entries {
 		if entry.Timestamp >= cutoff {
 			filtered = append(filtered, entry)
 		}
@@ -410,14 +434,17 @@ func (s *CronChecker) recordProbeWindow(keyID uint, windowMinutes int, success b
 	}
 
 	stats := probeWindowStats{
-		SampleCount:  lenAsInt64(filtered),
-		FailureCount: failureCount,
+		SampleCount:    lenAsInt64(filtered),
+		FailureCount:   failureCount,
+		WindowComplete: now.Unix()-state.StartedAt >= int64(windowMinutes*60),
 	}
 	if stats.SampleCount > 0 {
 		stats.FailureRate = float64(stats.FailureCount) * 100 / float64(stats.SampleCount)
 	}
 
-	payload, err := json.Marshal(filtered)
+	state.Entries = filtered
+
+	payload, err := json.Marshal(state)
 	if err != nil {
 		return probeWindowStats{}, fmt.Errorf("failed to marshal probe window: %w", err)
 	}
@@ -431,6 +458,79 @@ func (s *CronChecker) recordProbeWindow(keyID uint, windowMinutes int, success b
 	}
 
 	return stats, nil
+}
+
+type probeDecision struct {
+	ShouldBlacklist bool
+	ShouldRestore   bool
+}
+
+func decideProbeStatusChange(stats probeWindowStats, isValid bool, failureRateLimit float64) probeDecision {
+	if !stats.WindowComplete || stats.SampleCount == 0 {
+		return probeDecision{}
+	}
+
+	return probeDecision{
+		ShouldBlacklist: stats.FailureRate > failureRateLimit,
+		ShouldRestore:   isValid && stats.FailureRate <= failureRateLimit,
+	}
+}
+
+func earliestProbeTimestamp(entries []probeWindowEntry) int64 {
+	var earliest int64
+	for _, entry := range entries {
+		if earliest == 0 || entry.Timestamp < earliest {
+			earliest = entry.Timestamp
+		}
+	}
+	return earliest
+}
+
+func (s *CronChecker) parseGroupIdleProbeRanges(groupConfig map[string]any) ([]utils.DailyTimeRange, error) {
+	if len(groupConfig) == 0 {
+		return nil, nil
+	}
+
+	raw, ok := groupConfig["active_probe_idle_periods"]
+	if !ok {
+		return nil, nil
+	}
+
+	text, ok := raw.(string)
+	if !ok {
+		return nil, nil
+	}
+
+	return utils.ParseDailyTimeRanges(text)
+}
+
+func hasKeySpecificActiveProbeConfig(keyConfig map[string]any) bool {
+	if len(keyConfig) == 0 {
+		return false
+	}
+
+	for _, key := range []string{
+		"active_probe_enabled",
+		"active_probe_interval_seconds",
+		"active_probe_timeout_seconds",
+		"active_probe_window_minutes",
+		"active_probe_failure_rate_limit",
+	} {
+		if _, ok := keyConfig[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldUseActiveProbeForKey(inIdlePeriod bool, keyConfig map[string]any, effectiveConfig types.SystemSettings) bool {
+	if !effectiveConfig.ActiveProbeEnabled {
+		return false
+	}
+	if !inIdlePeriod {
+		return true
+	}
+	return hasKeySpecificActiveProbeConfig(keyConfig)
 }
 
 func (s *CronChecker) recordProbeLog(group *models.Group, key *models.APIKey, decryptedKey string, isSuccess bool, statusCode int, errorMessage string, duration int64) {
@@ -525,9 +625,15 @@ func (s *CronChecker) validateGroupKeys(group *models.Group) {
 
 	dueKeys := make([]models.APIKey, 0, len(invalidKeys))
 	now := time.Now()
+	idleRanges, idleErr := s.parseGroupIdleProbeRanges(group.Config)
+	if idleErr != nil {
+		logrus.WithError(idleErr).WithField("group_id", group.ID).Warn("CronChecker: invalid active probe idle periods during validation, ignoring group idle schedule")
+		idleRanges = nil
+	}
+	inIdlePeriod := utils.IsWithinDailyTimeRanges(now, idleRanges)
 	for i := range invalidKeys {
 		effectiveConfig := s.SettingsManager.GetEffectiveKeyConfig(group.Config, invalidKeys[i].Config)
-		if effectiveConfig.ActiveProbeEnabled {
+		if shouldUseActiveProbeForKey(inIdlePeriod, invalidKeys[i].Config, effectiveConfig) {
 			continue
 		}
 

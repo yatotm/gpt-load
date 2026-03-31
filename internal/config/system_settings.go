@@ -358,6 +358,16 @@ func (sm *SystemSettingsManager) ValidateGroupConfigOverrides(configMap map[stri
 		}
 	}
 
+	groupConfigType := reflect.TypeOf(models.GroupConfig{})
+	groupOnlyFields := make(map[string]reflect.StructField)
+	for i := 0; i < groupConfigType.NumField(); i++ {
+		field := groupConfigType.Field(i)
+		jsonTag := strings.Split(field.Tag.Get("json"), ",")[0]
+		if jsonTag != "" {
+			groupOnlyFields[jsonTag] = field
+		}
+	}
+
 	for key, value := range configMap {
 		if value == nil {
 			continue
@@ -365,13 +375,21 @@ func (sm *SystemSettingsManager) ValidateGroupConfigOverrides(configMap map[stri
 
 		field, ok := jsonToField[key]
 		if !ok {
+			field, ok = groupOnlyFields[key]
+		}
+		if !ok {
 			return fmt.Errorf("invalid setting key: %s", key)
+		}
+
+		fieldType := field.Type
+		if fieldType.Kind() == reflect.Ptr {
+			fieldType = fieldType.Elem()
 		}
 
 		validateTag := field.Tag.Get("validate")
 		rules := strings.Split(validateTag, ",")
 
-		switch field.Type.Kind() {
+		switch fieldType.Kind() {
 		case reflect.Int:
 			floatVal, ok := value.(float64)
 			if !ok {
@@ -397,6 +415,11 @@ func (sm *SystemSettingsManager) ValidateGroupConfigOverrides(configMap map[stri
 			strVal, ok := value.(string)
 			if !ok {
 				continue
+			}
+			if key == "active_probe_idle_periods" {
+				if _, err := utils.ParseDailyTimeRanges(strVal); err != nil {
+					return fmt.Errorf("invalid value for %s: %w", key, err)
+				}
 			}
 			for _, rule := range rules {
 				trimmedRule := strings.TrimSpace(rule)

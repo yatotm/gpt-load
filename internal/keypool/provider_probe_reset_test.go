@@ -11,6 +11,7 @@ import (
 	"gpt-load/internal/store"
 
 	"github.com/glebarez/sqlite"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -135,5 +136,67 @@ func TestRestoreMultipleKeysClearsProbeStatsAndWindow(t *testing.T) {
 	}
 	if exists {
 		t.Fatal("expected probe window to be deleted")
+	}
+}
+
+func TestHandleFailureClearsProbeStatsAndWindowWhenBlacklisting(t *testing.T) {
+	provider, db, dataStore := newTestKeyProviderWithSettings(t)
+
+	key := models.APIKey{
+		GroupID:          3,
+		KeyValue:         "flaky-key",
+		KeyHash:          "hash-flaky",
+		Status:           models.KeyStatusActive,
+		Priority:         models.DefaultAPIKeyPriority,
+		FailureCount:     0,
+		ProbeFailureRate: 40,
+		ProbeSampleCount: 5,
+		CreatedAt:        time.Now(),
+	}
+	if err := db.Create(&key).Error; err != nil {
+		t.Fatalf("failed to create key: %v", err)
+	}
+
+	keyHashKey := fmt.Sprintf("key:%d", key.ID)
+	if err := dataStore.HSet(keyHashKey, map[string]any{
+		"status":             models.KeyStatusActive,
+		"failure_count":      0,
+		"priority":           models.DefaultAPIKeyPriority,
+		"probe_failure_rate": 40,
+		"probe_sample_count": 5,
+	}); err != nil {
+		t.Fatalf("failed to seed key hash: %v", err)
+	}
+	if err := dataStore.Set(probeWindowStoreKey(key.ID), []byte(`{"started_at":1,"entries":[{"timestamp":1,"success":false}]}`), time.Minute); err != nil {
+		t.Fatalf("failed to seed probe window: %v", err)
+	}
+
+	group := &models.Group{
+		ID:     key.GroupID,
+		Config: datatypes.JSONMap{"blacklist_threshold": 1},
+	}
+	group.EffectiveConfig = provider.settingsManager.GetEffectiveConfig(group.Config)
+
+	if err := provider.handleFailure(&models.APIKey{ID: key.ID}, group, keyHashKey); err != nil {
+		t.Fatalf("handleFailure returned error: %v", err)
+	}
+
+	var updated models.APIKey
+	if err := db.First(&updated, key.ID).Error; err != nil {
+		t.Fatalf("failed to reload key: %v", err)
+	}
+	if updated.Status != models.KeyStatusInvalid {
+		t.Fatalf("expected key to be invalid, got %s", updated.Status)
+	}
+	if updated.ProbeFailureRate != 0 || updated.ProbeSampleCount != 0 {
+		t.Fatalf("expected probe stats to be reset, got rate=%v sample=%d", updated.ProbeFailureRate, updated.ProbeSampleCount)
+	}
+
+	exists, err := dataStore.Exists(probeWindowStoreKey(key.ID))
+	if err != nil {
+		t.Fatalf("failed to check probe window: %v", err)
+	}
+	if exists {
+		t.Fatal("expected probe window to be deleted after blacklisting")
 	}
 }

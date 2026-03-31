@@ -195,6 +195,7 @@ function handleNavigateToGroup(groupId: number) {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
 }
 
 .group-info {
@@ -206,16 +207,23 @@ function handleNavigateToGroup(groupId: number) {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 @media (min-width: 768px) {
   .keys-container {
     flex-direction: row;
+    height: calc(100vh - 159px);
+    min-height: 0;
   }
 
   .sidebar {
     width: 240px;
-    height: calc(100vh - 159px);
+    height: 100%;
+  }
+
+  .main-content {
+    height: 100%;
   }
 }
 </style>

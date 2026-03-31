@@ -54,7 +54,7 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    yatotm1994/gpt-load:v2.0.0
+    yatotm1994/gpt-load:v2.0.1
 ```
 
 > 请将 `your-secure-key-here` 改为强密码（决不能使用默认值），即可登录管理界面：<http://localhost:3001>
@@ -620,7 +620,7 @@ response = client.messages.create(
 
 感谢所有为 GPT-Load 做出贡献的开发者们！
 
-[![Contributors](https://contrib.rocks/image?repo=tbphp/gpt-load)](https://github.com/tbphp/gpt-load/graphs/contributors)
+[![Contributors](https://contrib.rocks/image?repo=yatotm/gpt-load)](https://github.com/yatotm/gpt-load/graphs/contributors)
 
 ## 支持者
 
@@ -634,4 +634,4 @@ MIT 许可证 - 详情请参阅 [LICENSE](LICENSE) 文件。
 
 ## Star History
 
-[![Stargazers over time](https://starchart.cc/tbphp/gpt-load.svg?variant=adaptive)](https://starchart.cc/tbphp/gpt-load)
+[![Stargazers over time](https://starchart.cc/yatotm/gpt-load.svg?variant=adaptive)](https://starchart.cc/yatotm/gpt-load)

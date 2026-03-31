@@ -34,3 +34,24 @@ func TestGetEffectiveKeyConfig(t *testing.T) {
 		t.Fatalf("expected group override failure rate limit to be inherited, got %d", effective.ActiveProbeFailureRateLimit)
 	}
 }
+
+func TestValidateGroupConfigOverridesAcceptsActiveProbeIdlePeriods(t *testing.T) {
+	manager := NewSystemSettingsManager()
+
+	if err := manager.ValidateGroupConfigOverrides(map[string]any{
+		"active_probe_idle_periods": "00:00-08:00,23:00-06:00",
+	}); err != nil {
+		t.Fatalf("expected idle periods config to pass validation, got %v", err)
+	}
+}
+
+func TestValidateGroupConfigOverridesRejectsInvalidActiveProbeIdlePeriods(t *testing.T) {
+	manager := NewSystemSettingsManager()
+
+	err := manager.ValidateGroupConfigOverrides(map[string]any{
+		"active_probe_idle_periods": "08:00-08:00",
+	})
+	if err == nil {
+		t.Fatal("expected invalid idle periods config to be rejected")
+	}
+}

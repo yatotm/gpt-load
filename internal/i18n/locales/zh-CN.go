@@ -181,6 +181,8 @@ var MessagesZhCN = map[string]string{
 	"config.active_probe_window_minutes_desc":     "计算主动探测失败率的滚动时间窗口（分钟）。",
 	"config.active_probe_failure_rate_limit":      "主动探测失败率阈值（%）",
 	"config.active_probe_failure_rate_limit_desc": "滚动窗口内失败率超过该阈值时自动拉黑，恢复到阈值内且探测成功时自动拉白。",
+	"config.active_probe_idle_periods":            "主动探测闲时时段",
+	"config.active_probe_idle_periods_desc":       "多个时段用英文逗号分隔，格式为 HH:MM-HH:MM，按服务器本地时间判断；命中闲时时段时分组默认关闭主动探测，跨午夜可写为 23:00-06:00。单 Key 若配置了自己的主动探测参数，则仍按单 Key 设定执行。",
 
 	// Category labels
 	"config.category.basic":   "基础参数",

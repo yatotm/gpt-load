@@ -844,19 +844,30 @@ func (s *GroupService) GetGroupConfigOptions() ([]ConfigOption, error) {
 		}
 
 		definition, ok := defMap[key]
-		if !ok {
-			continue
-		}
+		name := definition.Name
+		description := definition.Description
 
 		var defaultValue any
 		if fieldName, ok := jsonToFieldMap[key]; ok {
 			defaultValue = currentSettingsValue.FieldByName(fieldName).Interface()
+		} else if field.Type.Kind() == reflect.Ptr {
+			defaultValue = reflect.Zero(field.Type.Elem()).Interface()
+		} else {
+			defaultValue = reflect.Zero(field.Type).Interface()
+		}
+
+		if !ok {
+			name = field.Tag.Get("name")
+			description = field.Tag.Get("desc")
+		}
+		if name == "" || description == "" {
+			continue
 		}
 
 		options = append(options, ConfigOption{
 			Key:          key,
-			Name:         definition.Name,
-			Description:  definition.Description,
+			Name:         name,
+			Description:  description,
 			DefaultValue: defaultValue,
 		})
 	}

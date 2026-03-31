@@ -181,6 +181,8 @@ var MessagesEnUS = map[string]string{
 	"config.active_probe_window_minutes_desc":     "Rolling time window in minutes used to calculate active probe failure rate.",
 	"config.active_probe_failure_rate_limit":      "Active Probe Failure Rate Limit (%)",
 	"config.active_probe_failure_rate_limit_desc": "Automatically blacklist when the rolling failure rate exceeds this limit, and restore when the key probes successfully back within the limit.",
+	"config.active_probe_idle_periods":            "Active Probe Idle Periods",
+	"config.active_probe_idle_periods_desc":       "Comma-separated daily periods in HH:MM-HH:MM format using server local time. During idle periods, group-default active probing is disabled; cross-midnight ranges like 23:00-06:00 are supported. Keys with their own active probe overrides still follow key-level settings.",
 
 	// Category labels
 	"config.category.basic":   "Basic",

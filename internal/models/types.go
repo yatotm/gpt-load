@@ -44,6 +44,7 @@ type GroupConfig struct {
 	ActiveProbeTimeoutSeconds    *int    `json:"active_probe_timeout_seconds,omitempty"`
 	ActiveProbeWindowMinutes     *int    `json:"active_probe_window_minutes,omitempty"`
 	ActiveProbeFailureRateLimit  *int    `json:"active_probe_failure_rate_limit,omitempty"`
+	ActiveProbeIdlePeriods       *string `json:"active_probe_idle_periods,omitempty" name:"config.active_probe_idle_periods" desc:"config.active_probe_idle_periods_desc"`
 	EnableRequestBodyLogging     *bool   `json:"enable_request_body_logging,omitempty"`
 }
 

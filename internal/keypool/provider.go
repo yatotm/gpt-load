@@ -580,6 +580,9 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 		shouldBlacklist := blacklistThreshold > 0 && newFailureCount >= int64(blacklistThreshold)
 		if shouldBlacklist {
 			updates["status"] = models.KeyStatusInvalid
+			for field, value := range resetProbeStatsUpdates() {
+				updates[field] = value
+			}
 		}
 
 		if err := tx.Model(&key).Updates(updates).Error; err != nil {
@@ -595,8 +598,15 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 			if err := p.removeActiveKeyFromLists(group.ID, apiKey.ID, priority); err != nil {
 				return fmt.Errorf("failed to remove key from active lists: %w", err)
 			}
-			if err := p.store.HSet(keyHashKey, map[string]any{"status": models.KeyStatusInvalid}); err != nil {
+			storeUpdates := map[string]any{"status": models.KeyStatusInvalid}
+			for field, value := range resetProbeStatsUpdates() {
+				storeUpdates[field] = value
+			}
+			if err := p.store.HSet(keyHashKey, storeUpdates); err != nil {
 				return fmt.Errorf("failed to update key status to invalid in store: %w", err)
+			}
+			if err := p.clearProbeWindow(apiKey.ID); err != nil {
+				return err
 			}
 		}
 

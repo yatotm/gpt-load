@@ -470,6 +470,20 @@ function formatNumber(num: number): string {
   flex: 1;
   overflow-y: auto;
   padding: 16px;
+  min-height: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.keys-grid-container::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.keys-grid-container :deep(.n-spin-container),
+.keys-grid-container :deep(.n-spin-content) {
+  min-height: 0;
+  height: 100%;
 }
 
 .keys-grid {

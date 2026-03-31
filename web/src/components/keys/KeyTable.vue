@@ -1236,14 +1236,22 @@ function resetPage() {
   overflow-y: auto;
   padding: 14px;
   min-height: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   background:
     linear-gradient(180deg, rgba(15, 23, 42, 0.02), transparent 28%),
     var(--bg-secondary, transparent);
 }
 
+.keys-grid-container::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 .keys-grid-container :deep(.n-spin-container),
 .keys-grid-container :deep(.n-spin-content) {
   min-height: 0;
+  height: 100%;
 }
 
 .keys-grid {

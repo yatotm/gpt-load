@@ -181,6 +181,8 @@ var MessagesJaJP = map[string]string{
 	"config.active_probe_window_minutes_desc":     "アクティブプローブの失敗率を計算するローリング時間ウィンドウ（分）。",
 	"config.active_probe_failure_rate_limit":      "アクティブプローブ失敗率しきい値（%）",
 	"config.active_probe_failure_rate_limit_desc": "ローリング失敗率がこの値を超えると自動でブラックリスト化し、しきい値内に戻って成功した場合に自動で復旧します。",
+	"config.active_probe_idle_periods":            "アクティブプローブ休止時間帯",
+	"config.active_probe_idle_periods_desc":       "サーバーのローカル時刻で判定する日次時間帯を、HH:MM-HH:MM 形式でカンマ区切り指定します。休止時間帯ではグループ既定のアクティブプローブを停止し、23:00-06:00 のような日跨ぎも指定できます。キー側に独自のアクティブプローブ設定がある場合は、そのキー設定を優先します。",
 
 	// Category labels
 	"config.category.basic":   "基本設定",
