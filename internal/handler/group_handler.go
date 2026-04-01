@@ -61,6 +61,7 @@ type GroupCreateRequest struct {
 	ProbeParamOverrides map[string]any      `json:"probe_param_overrides"`
 	ModelRedirectRules  map[string]string   `json:"model_redirect_rules"`
 	ModelRedirectStrict bool                `json:"model_redirect_strict"`
+	StreamTimeoutRules  map[string]int      `json:"stream_timeout_rules"`
 	Config              map[string]any      `json:"config"`
 	HeaderRules         []models.HeaderRule `json:"header_rules"`
 	ProxyKeys           string              `json:"proxy_keys"`
@@ -88,6 +89,7 @@ func (s *Server) CreateGroup(c *gin.Context) {
 		ProbeParamOverrides: req.ProbeParamOverrides,
 		ModelRedirectRules:  req.ModelRedirectRules,
 		ModelRedirectStrict: req.ModelRedirectStrict,
+		StreamTimeoutRules:  req.StreamTimeoutRules,
 		Config:              req.Config,
 		HeaderRules:         req.HeaderRules,
 		ProxyKeys:           req.ProxyKeys,
@@ -132,6 +134,7 @@ type GroupUpdateRequest struct {
 	ProbeParamOverrides map[string]any      `json:"probe_param_overrides"`
 	ModelRedirectRules  map[string]string   `json:"model_redirect_rules"`
 	ModelRedirectStrict *bool               `json:"model_redirect_strict"`
+	StreamTimeoutRules  map[string]int      `json:"stream_timeout_rules"`
 	Config              map[string]any      `json:"config"`
 	HeaderRules         []models.HeaderRule `json:"header_rules"`
 	ProxyKeys           *string             `json:"proxy_keys,omitempty"`
@@ -194,6 +197,7 @@ func (s *Server) UpdateGroup(c *gin.Context) {
 		ProbeParamOverrides: req.ProbeParamOverrides,
 		ModelRedirectRules:  req.ModelRedirectRules,
 		ModelRedirectStrict: req.ModelRedirectStrict,
+		StreamTimeoutRules:  req.StreamTimeoutRules,
 		Config:              req.Config,
 		ProxyKeys:           req.ProxyKeys,
 	}
@@ -265,6 +269,7 @@ type GroupResponse struct {
 	ProbeParamOverrides datatypes.JSONMap   `json:"probe_param_overrides"`
 	ModelRedirectRules  datatypes.JSONMap   `json:"model_redirect_rules"`
 	ModelRedirectStrict bool                `json:"model_redirect_strict"`
+	StreamTimeoutRules  datatypes.JSONMap   `json:"stream_timeout_rules"`
 	Config              datatypes.JSONMap   `json:"config"`
 	HeaderRules         []models.HeaderRule `json:"header_rules"`
 	ProxyKeys           string              `json:"proxy_keys"`
@@ -310,6 +315,7 @@ func (s *Server) newGroupResponse(group *models.Group) *GroupResponse {
 		ProbeParamOverrides: group.ProbeParamOverrides,
 		ModelRedirectRules:  group.ModelRedirectRules,
 		ModelRedirectStrict: group.ModelRedirectStrict,
+		StreamTimeoutRules:  group.StreamTimeoutRules,
 		Config:              group.Config,
 		HeaderRules:         headerRules,
 		ProxyKeys:           group.ProxyKeys,
@@ -339,6 +345,8 @@ type ConfigOption struct {
 	Name         string `json:"name"`
 	Description  string `json:"description"`
 	DefaultValue any    `json:"default_value"`
+	Type         string `json:"type"`
+	MinValue     *int   `json:"min_value,omitempty"`
 }
 
 // GetGroupConfigOptions returns a list of available configuration options for groups.
@@ -364,6 +372,8 @@ func (s *Server) GetGroupConfigOptions(c *gin.Context) {
 			Name:         name,
 			Description:  description,
 			DefaultValue: option.DefaultValue,
+			Type:         option.Type,
+			MinValue:     option.MinValue,
 		})
 	}
 

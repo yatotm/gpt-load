@@ -82,6 +82,8 @@ const hasAdvancedConfig = computed(() => {
     (props.group?.param_overrides && Object.keys(props.group.param_overrides).length > 0) ||
     (props.group?.probe_param_overrides &&
       Object.keys(props.group.probe_param_overrides).length > 0) ||
+    (props.group?.stream_timeout_rules &&
+      Object.keys(props.group.stream_timeout_rules).length > 0) ||
     (props.group?.header_rules && props.group.header_rules.length > 0)
   );
 });
@@ -209,6 +211,13 @@ function getConfigDisplayName(key: string): string {
 function getConfigDescription(key: string): string {
   const option = configOptions.value.find(opt => opt.key === key);
   return option?.description || t("keys.noDescription");
+}
+
+function formatLatency(ms: number): string {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  return `${(ms / 1000).toFixed(2).replace(/\.?0+$/, "")}s`;
 }
 
 function handleEdit() {
@@ -677,6 +686,36 @@ function resetPage() {
                 </n-form>
               </div>
 
+              <div class="detail-section" v-if="!isAggregateGroup">
+                <h4 class="section-title">{{ t("keys.streamFirstVisibleStats") }}</h4>
+                <div
+                  v-if="
+                    stats?.stream_first_visible_stats && stats.stream_first_visible_stats.length > 0
+                  "
+                  class="first-visible-stats"
+                >
+                  <div
+                    v-for="item in stats.stream_first_visible_stats"
+                    :key="item.model"
+                    class="first-visible-item"
+                  >
+                    <div class="first-visible-model">{{ item.model }}</div>
+                    <div class="first-visible-meta">
+                      <n-tag size="small" type="info">
+                        {{ t("keys.averageFirstVisibleLatency") }}:
+                        {{ formatLatency(item.average_latency_ms) }}
+                      </n-tag>
+                      <n-tag size="small" type="default">
+                        {{ t("keys.sampleCount") }}: {{ item.sample_count }}
+                      </n-tag>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="first-visible-empty">
+                  {{ t("keys.streamFirstVisibleStatsEmpty") }}
+                </div>
+              </div>
+
               <!-- 标准分组才显示高级配置 -->
               <div class="detail-section" v-if="!isAggregateGroup && hasAdvancedConfig">
                 <h4 class="section-title">{{ t("keys.advancedConfig") }}</h4>
@@ -751,6 +790,18 @@ function resetPage() {
                   >
                     <pre class="config-json">{{
                       JSON.stringify(group?.model_redirect_rules || {}, null, 2)
+                    }}</pre>
+                  </n-form-item>
+                  <n-form-item
+                    v-if="
+                      group?.stream_timeout_rules &&
+                      Object.keys(group.stream_timeout_rules).length > 0
+                    "
+                    :label="`${t('keys.streamTimeoutRules')}：`"
+                    :span="2"
+                  >
+                    <pre class="config-json">{{
+                      JSON.stringify(group?.stream_timeout_rules || {}, null, 2)
                     }}</pre>
                   </n-form-item>
                   <n-form-item
@@ -1062,5 +1113,44 @@ function resetPage() {
   color: var(--error-color, #dc2626);
   font-style: italic;
   font-size: 0.8rem;
+}
+
+.first-visible-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.first-visible-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  background: var(--bg-secondary);
+}
+
+.first-visible-model {
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.first-visible-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.first-visible-empty {
+  padding: 12px 14px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--border-radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 </style>

@@ -196,10 +196,12 @@ function handleNavigateToGroup(groupId: number) {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .group-info {
   flex-shrink: 0;
+  min-height: 0;
 }
 
 .key-table-section {

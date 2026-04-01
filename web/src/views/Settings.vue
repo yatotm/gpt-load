@@ -76,12 +76,16 @@ function generateValidationRules(item: Setting): FormItemRule[] {
       message: t("settings.pleaseInput", { field: item.name }),
       trigger: ["input", "blur"],
     };
-    if (item.type === "int") {
+    if (item.type === "int" || item.type === "float64") {
       rule.type = "number";
     }
     rules.push(rule);
   }
-  if (item.type === "int" && item.min_value !== undefined && item.min_value !== null) {
+  if (
+    (item.type === "int" || item.type === "float64") &&
+    item.min_value !== undefined &&
+    item.min_value !== null
+  ) {
     rules.push({
       validator: (_rule: FormItemRule, value: number) => {
         if (value === null || value === undefined) {
@@ -135,11 +139,13 @@ function generateValidationRules(item: Setting): FormItemRule[] {
                 </template>
 
                 <n-input-number
-                  v-if="item.type === 'int'"
+                  v-if="item.type === 'int' || item.type === 'float64'"
                   v-model:value="form[item.key] as number"
                   :min="
                     item.min_value !== undefined && item.min_value >= 0 ? item.min_value : undefined
                   "
+                  :precision="item.type === 'int' ? 0 : 2"
+                  :step="item.type === 'int' ? 1 : 0.1"
                   :placeholder="t('settings.inputNumber')"
                   clearable
                   style="width: 100%"

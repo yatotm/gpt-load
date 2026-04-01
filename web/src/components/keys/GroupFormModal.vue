@@ -46,6 +46,11 @@ interface HeaderRuleItem {
   action: "set" | "remove";
 }
 
+interface StreamTimeoutRuleItem {
+  model: string;
+  timeout: number | null;
+}
+
 const props = withDefaults(defineProps<Props>(), {
   group: null,
 });
@@ -83,6 +88,7 @@ interface GroupFormData {
   param_overrides: string;
   probe_param_overrides: string;
   model_redirect_rules: string;
+  stream_timeout_rules: StreamTimeoutRuleItem[];
   model_redirect_strict: boolean;
   config: Record<string, number | string | boolean>;
   configItems: ConfigItem[];
@@ -109,6 +115,7 @@ const formData = reactive<GroupFormData>({
   param_overrides: "",
   probe_param_overrides: "",
   model_redirect_rules: "",
+  stream_timeout_rules: [] as StreamTimeoutRuleItem[],
   model_redirect_strict: false,
   config: {},
   configItems: [] as ConfigItem[],
@@ -311,6 +318,7 @@ function resetForm() {
     param_overrides: "",
     probe_param_overrides: "",
     model_redirect_rules: "",
+    stream_timeout_rules: [],
     model_redirect_strict: false,
     config: {},
     configItems: [],
@@ -354,6 +362,12 @@ function loadGroupData() {
     param_overrides: JSON.stringify(props.group.param_overrides || {}, null, 2),
     probe_param_overrides: JSON.stringify(props.group.probe_param_overrides || {}, null, 2),
     model_redirect_rules: JSON.stringify(props.group.model_redirect_rules || {}, null, 2),
+    stream_timeout_rules: Object.entries(props.group.stream_timeout_rules || {}).map(
+      ([model, timeout]) => ({
+        model,
+        timeout,
+      })
+    ),
     model_redirect_strict: props.group.model_redirect_strict || false,
     config: {},
     configItems,
@@ -427,6 +441,25 @@ function removeHeaderRule(index: number) {
   formData.header_rules.splice(index, 1);
 }
 
+function addStreamTimeoutRule() {
+  formData.stream_timeout_rules.push({
+    model: "",
+    timeout: null,
+  });
+}
+
+function removeStreamTimeoutRule(index: number) {
+  formData.stream_timeout_rules.splice(index, 1);
+}
+
+function hasValidStreamTimeoutWildcard(model: string): boolean {
+  const wildcardCount = (model.match(/\*/g) || []).length;
+  if (wildcardCount === 0) {
+    return true;
+  }
+  return wildcardCount === 1 && model.endsWith("*");
+}
+
 // 规范化Header Key到Canonical格式（模拟HTTP标准）
 function canonicalHeaderKey(key: string): string {
   if (!key) {
@@ -465,6 +498,14 @@ function handleConfigKeyChange(index: number, key: string) {
 const getConfigOption = (key: string) => {
   return configOptions.value.find(opt => opt.key === key);
 };
+
+function getConfigPrecision(key: string): number | undefined {
+  return getConfigOption(key)?.type === "int" ? 0 : 2;
+}
+
+function getConfigStep(key: string): number {
+  return getConfigOption(key)?.type === "int" ? 1 : 0.1;
+}
 
 // 关闭弹窗
 function handleClose() {
@@ -526,6 +567,34 @@ async function handleSubmit() {
       }
     }
 
+    const streamTimeoutRules: Record<string, number> = {};
+    for (const rule of formData.stream_timeout_rules) {
+      const model = rule.model.trim();
+      if (model === "") {
+        message.error(t("keys.streamTimeoutRulesEmptyModel"));
+        return;
+      }
+      if (!hasValidStreamTimeoutWildcard(model)) {
+        message.error(t("keys.streamTimeoutRulesInvalidWildcard"));
+        return;
+      }
+      if (
+        rule.timeout === null ||
+        rule.timeout === undefined ||
+        Number.isNaN(rule.timeout) ||
+        !Number.isInteger(rule.timeout) ||
+        rule.timeout < 0
+      ) {
+        message.error(t("keys.streamTimeoutRulesInvalidFormat"));
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(streamTimeoutRules, model)) {
+        message.error(t("keys.duplicateStreamTimeoutRule"));
+        return;
+      }
+      streamTimeoutRules[model] = rule.timeout;
+    }
+
     // 将configItems转换为config对象
     const config: Record<string, number | string | boolean> = {};
     formData.configItems.forEach((item: ConfigItem) => {
@@ -553,6 +622,7 @@ async function handleSubmit() {
       param_overrides: paramOverrides,
       probe_param_overrides: probeParamOverrides,
       model_redirect_rules: modelRedirectRules,
+      stream_timeout_rules: streamTimeoutRules,
       model_redirect_strict: formData.model_redirect_strict,
       config,
       header_rules: formData.header_rules
@@ -936,7 +1006,9 @@ async function handleSubmit() {
                               v-if="typeof configItem.value === 'number'"
                               v-model:value="configItem.value"
                               :placeholder="t('keys.paramValue')"
-                              :precision="0"
+                              :precision="getConfigPrecision(configItem.key)"
+                              :step="getConfigStep(configItem.key)"
+                              :min="getConfigOption(configItem.key)?.min_value"
                               style="width: 100%"
                             />
                             <n-switch
@@ -1218,6 +1290,71 @@ async function handleSubmit() {
                 </n-form-item>
               </div>
             </n-collapse-item>
+
+            <n-collapse-item v-if="formData.group_type !== 'aggregate'" name="stream-timeout-rules">
+              <template #header>
+                <div class="form-label-with-tooltip">
+                  {{ t("keys.streamTimeoutRules") }}
+                  <n-tooltip trigger="hover" placement="top">
+                    <template #trigger>
+                      <n-icon :component="HelpCircleOutline" class="help-icon config-help" />
+                    </template>
+                    {{ t("keys.streamTimeoutRulesTooltip") }}
+                  </n-tooltip>
+                </div>
+              </template>
+
+              <div class="stream-timeout-rules-panel">
+                <div
+                  v-for="(rule, index) in formData.stream_timeout_rules"
+                  :key="`stream-timeout-rule-${index}`"
+                  class="stream-timeout-rule-row"
+                >
+                  <div class="stream-timeout-rule-model">
+                    <n-input
+                      v-model:value="rule.model"
+                      :placeholder="t('keys.streamTimeoutRuleModelPlaceholder')"
+                    />
+                  </div>
+                  <div class="stream-timeout-rule-timeout">
+                    <n-input-number
+                      v-model:value="rule.timeout"
+                      :min="0"
+                      :precision="0"
+                      :step="1"
+                      :placeholder="t('keys.streamTimeoutRuleTimeoutPlaceholder')"
+                      style="width: 100%"
+                    />
+                  </div>
+                  <div class="stream-timeout-rule-actions">
+                    <n-button
+                      @click="removeStreamTimeoutRule(index)"
+                      type="error"
+                      quaternary
+                      circle
+                      size="small"
+                    >
+                      <template #icon>
+                        <n-icon :component="Remove" />
+                      </template>
+                    </n-button>
+                  </div>
+                </div>
+
+                <div class="stream-timeout-rule-footer">
+                  <n-button @click="addStreamTimeoutRule" dashed style="width: 100%">
+                    <template #icon>
+                      <n-icon :component="Add" />
+                    </template>
+                    {{ t("keys.addStreamTimeoutRule") }}
+                  </n-button>
+                </div>
+
+                <div class="stream-timeout-rule-feedback">
+                  {{ t("keys.streamTimeoutRulesDescription") }}
+                </div>
+              </div>
+            </n-collapse-item>
           </n-collapse>
         </div>
       </n-form>
@@ -1293,6 +1430,42 @@ async function handleSubmit() {
 
 .config-section {
   margin-top: 16px;
+}
+
+.stream-timeout-rules-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stream-timeout-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.stream-timeout-rule-model {
+  flex: 1;
+  min-width: 0;
+}
+
+.stream-timeout-rule-timeout {
+  width: 180px;
+  flex-shrink: 0;
+}
+
+.stream-timeout-rule-actions {
+  flex-shrink: 0;
+}
+
+.stream-timeout-rule-footer {
+  padding-top: 4px;
+}
+
+.stream-timeout-rule-feedback {
+  font-size: 14px;
+  color: #999;
 }
 
 .config-title {
@@ -1532,8 +1705,18 @@ async function handleSubmit() {
     flex: 1;
   }
 
+  .stream-timeout-rule-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .stream-timeout-rule-timeout {
+    width: 100%;
+  }
+
   .upstream-actions,
-  .config-actions {
+  .config-actions,
+  .stream-timeout-rule-actions {
     justify-content: flex-end;
   }
 }

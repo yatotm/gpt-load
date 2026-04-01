@@ -21,9 +21,10 @@ import (
 var errStreamEndedBeforeVisibleOutput = errors.New("stream ended before first visible output")
 
 type streamRelayResult struct {
-	Committed bool
-	Retryable bool
-	Err       error
+	Committed           bool
+	Retryable           bool
+	Err                 error
+	FirstVisibleLatency time.Duration
 }
 
 type streamStartGuard struct {
@@ -120,6 +121,7 @@ func (ps *ProxyServer) handleStreamingResponse(
 	c *gin.Context,
 	resp *http.Response,
 	startGuard *streamStartGuard,
+	attemptStart time.Time,
 ) streamRelayResult {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -134,10 +136,10 @@ func (ps *ProxyServer) handleStreamingResponse(
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") {
-		return ps.handleSSEStreamingResponse(c, resp, flusher, startGuard)
+		return ps.handleSSEStreamingResponse(c, resp, flusher, startGuard, attemptStart)
 	}
 
-	return ps.handleRawStreamingResponse(c, resp, flusher, startGuard)
+	return ps.handleRawStreamingResponse(c, resp, flusher, startGuard, attemptStart)
 }
 
 func (ps *ProxyServer) handleSSEStreamingResponse(
@@ -145,15 +147,17 @@ func (ps *ProxyServer) handleSSEStreamingResponse(
 	resp *http.Response,
 	flusher http.Flusher,
 	startGuard *streamStartGuard,
+	attemptStart time.Time,
 ) streamRelayResult {
 	reader := bufio.NewReader(resp.Body)
 	var pending bytes.Buffer
 	committed := false
+	var firstVisibleLatency time.Duration
 
 	for {
 		event, err := readSSEvent(reader)
 		if err != nil {
-			return streamReadResult(committed, startGuard, err)
+			return streamReadResult(committed, startGuard, err, firstVisibleLatency)
 		}
 
 		classification := classifySSEvent(event)
@@ -169,14 +173,15 @@ func (ps *ProxyServer) handleSSEStreamingResponse(
 			if startGuard != nil {
 				startGuard.Commit()
 			}
+			firstVisibleLatency = time.Since(attemptStart)
 			ps.writeStreamingHeaders(c, resp)
 			if pending.Len() > 0 {
 				if _, writeErr := c.Writer.Write(pending.Bytes()); writeErr != nil {
-					return streamRelayResult{Committed: true, Err: writeErr}
+					return streamRelayResult{Committed: true, Err: writeErr, FirstVisibleLatency: firstVisibleLatency}
 				}
 			}
 			if _, writeErr := c.Writer.Write(event.raw); writeErr != nil {
-				return streamRelayResult{Committed: true, Err: writeErr}
+				return streamRelayResult{Committed: true, Err: writeErr, FirstVisibleLatency: firstVisibleLatency}
 			}
 			flusher.Flush()
 			committed = true
@@ -184,7 +189,7 @@ func (ps *ProxyServer) handleSSEStreamingResponse(
 		}
 
 		if _, writeErr := c.Writer.Write(event.raw); writeErr != nil {
-			return streamRelayResult{Committed: true, Err: writeErr}
+			return streamRelayResult{Committed: true, Err: writeErr, FirstVisibleLatency: firstVisibleLatency}
 		}
 		flusher.Flush()
 	}
@@ -195,9 +200,11 @@ func (ps *ProxyServer) handleRawStreamingResponse(
 	resp *http.Response,
 	flusher http.Flusher,
 	startGuard *streamStartGuard,
+	attemptStart time.Time,
 ) streamRelayResult {
 	buf := make([]byte, 4*1024)
 	committed := false
+	var firstVisibleLatency time.Duration
 
 	for {
 		n, err := resp.Body.Read(buf)
@@ -206,47 +213,51 @@ func (ps *ProxyServer) handleRawStreamingResponse(
 				if startGuard != nil {
 					startGuard.Commit()
 				}
+				firstVisibleLatency = time.Since(attemptStart)
 				ps.writeStreamingHeaders(c, resp)
 				committed = true
 			}
 			if _, writeErr := c.Writer.Write(buf[:n]); writeErr != nil {
-				return streamRelayResult{Committed: committed, Err: writeErr}
+				return streamRelayResult{Committed: committed, Err: writeErr, FirstVisibleLatency: firstVisibleLatency}
 			}
 			flusher.Flush()
 		}
 
 		if err != nil {
-			return streamReadResult(committed, startGuard, err)
+			return streamReadResult(committed, startGuard, err, firstVisibleLatency)
 		}
 	}
 }
 
-func streamReadResult(committed bool, startGuard *streamStartGuard, err error) streamRelayResult {
+func streamReadResult(committed bool, startGuard *streamStartGuard, err error, firstVisibleLatency time.Duration) streamRelayResult {
 	if err == nil {
-		return streamRelayResult{Committed: committed}
+		return streamRelayResult{Committed: committed, FirstVisibleLatency: firstVisibleLatency}
 	}
 	if errors.Is(err, io.EOF) {
 		if committed {
-			return streamRelayResult{Committed: true}
+			return streamRelayResult{Committed: true, FirstVisibleLatency: firstVisibleLatency}
 		}
 		if startGuard != nil && startGuard.TimedOut() {
 			return streamRelayResult{
-				Retryable: true,
-				Err:       newStreamFirstVisibleTimeoutError(startGuard.Timeout()),
+				Retryable:           true,
+				Err:                 newStreamFirstVisibleTimeoutError(startGuard.Timeout()),
+				FirstVisibleLatency: firstVisibleLatency,
 			}
 		}
-		return streamRelayResult{Retryable: true, Err: errStreamEndedBeforeVisibleOutput}
+		return streamRelayResult{Retryable: true, Err: errStreamEndedBeforeVisibleOutput, FirstVisibleLatency: firstVisibleLatency}
 	}
 	if !committed && startGuard != nil && startGuard.TimedOut() {
 		return streamRelayResult{
-			Retryable: true,
-			Err:       newStreamFirstVisibleTimeoutError(startGuard.Timeout()),
+			Retryable:           true,
+			Err:                 newStreamFirstVisibleTimeoutError(startGuard.Timeout()),
+			FirstVisibleLatency: firstVisibleLatency,
 		}
 	}
 	return streamRelayResult{
-		Committed: committed,
-		Retryable: !committed,
-		Err:       err,
+		Committed:           committed,
+		Retryable:           !committed,
+		Err:                 err,
+		FirstVisibleLatency: firstVisibleLatency,
 	}
 }
 

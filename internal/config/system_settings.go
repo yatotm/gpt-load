@@ -319,6 +319,21 @@ func (sm *SystemSettingsManager) ValidateSettings(settingsMap map[string]any) er
 					}
 				}
 			}
+		case reflect.Float64:
+			floatVal, ok := value.(float64)
+			if !ok {
+				return fmt.Errorf("invalid type for %s: expected a number, got %T", key, value)
+			}
+			for _, rule := range rules {
+				trimmedRule := strings.TrimSpace(rule)
+				if strings.HasPrefix(trimmedRule, "min=") {
+					minValStr := strings.TrimPrefix(trimmedRule, "min=")
+					minVal, _ := strconv.ParseFloat(minValStr, 64)
+					if floatVal < minVal {
+						return fmt.Errorf("value for %s (%v) is below minimum value (%v)", key, floatVal, minVal)
+					}
+				}
+			}
 		case reflect.Bool:
 			if _, ok := value.(bool); !ok {
 				return fmt.Errorf("invalid type for %s: expected a boolean, got %T", key, value)
@@ -411,6 +426,21 @@ func (sm *SystemSettingsManager) ValidateGroupConfigOverrides(configMap map[stri
 					}
 				}
 			}
+		case reflect.Float64:
+			floatVal, ok := value.(float64)
+			if !ok {
+				continue
+			}
+			for _, rule := range rules {
+				trimmedRule := strings.TrimSpace(rule)
+				if strings.HasPrefix(trimmedRule, "min=") {
+					minValStr := strings.TrimPrefix(trimmedRule, "min=")
+					minVal, _ := strconv.ParseFloat(minValStr, 64)
+					if floatVal < minVal {
+						return fmt.Errorf("value for %s (%v) is below minimum value (%v)", key, floatVal, minVal)
+					}
+				}
+			}
 		case reflect.String:
 			strVal, ok := value.(string)
 			if !ok {
@@ -456,6 +486,7 @@ func (sm *SystemSettingsManager) DisplaySystemConfig(settings types.SystemSettin
 	logrus.Infof("    Connect Timeout: %d seconds", settings.ConnectTimeout)
 	logrus.Infof("    Response Header Timeout: %d seconds", settings.ResponseHeaderTimeout)
 	logrus.Infof("    Stream First Visible Output Timeout: %d seconds", settings.StreamFirstVisibleTimeoutSeconds)
+	logrus.Infof("    Stream Timeout Failure Penalty Multiplier: %.2f", settings.StreamTimeoutFailurePenaltyMultiplier)
 	logrus.Infof("    Idle Connection Timeout: %d seconds", settings.IdleConnTimeout)
 	logrus.Infof("    Max Idle Connections: %d", settings.MaxIdleConns)
 	logrus.Infof("    Max Idle Connections Per Host: %d", settings.MaxIdleConnsPerHost)

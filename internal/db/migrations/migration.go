@@ -19,7 +19,11 @@ func MigrateDatabase(db *gorm.DB) error {
 		return err
 	}
 
-	return V1_2_1_ExcludeProbeLogsFromTrafficStats(db)
+	if err := V1_2_1_ExcludeProbeLogsFromTrafficStats(db); err != nil {
+		return err
+	}
+
+	return V1_2_2_EnableWeightedKeyFailures(db)
 }
 
 // HandleLegacyIndexes removes old indexes from previous versions to prevent migration errors

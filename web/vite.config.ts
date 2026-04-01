@@ -21,9 +21,12 @@ export default defineConfig(({ mode }) => {
       host: "0.0.0.0",
       port: 5173,
       strictPort: true,
-      // 代理配置示例
       proxy: {
         "/api": {
+          target: env.VITE_API_BASE_URL || "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/proxy": {
           target: env.VITE_API_BASE_URL || "http://127.0.0.1:3001",
           changeOrigin: true,
         },

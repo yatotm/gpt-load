@@ -27,26 +27,27 @@ type SystemSetting struct {
 
 // GroupConfig 存储特定于分组的配置
 type GroupConfig struct {
-	RequestTimeout                   *int    `json:"request_timeout,omitempty"`
-	IdleConnTimeout                  *int    `json:"idle_conn_timeout,omitempty"`
-	ConnectTimeout                   *int    `json:"connect_timeout,omitempty"`
-	MaxIdleConns                     *int    `json:"max_idle_conns,omitempty"`
-	MaxIdleConnsPerHost              *int    `json:"max_idle_conns_per_host,omitempty"`
-	ResponseHeaderTimeout            *int    `json:"response_header_timeout,omitempty"`
-	StreamFirstVisibleTimeoutSeconds *int    `json:"stream_first_visible_timeout_seconds,omitempty"`
-	ProxyURL                         *string `json:"proxy_url,omitempty"`
-	MaxRetries                       *int    `json:"max_retries,omitempty"`
-	BlacklistThreshold               *int    `json:"blacklist_threshold,omitempty"`
-	KeyValidationIntervalMinutes     *int    `json:"key_validation_interval_minutes,omitempty"`
-	KeyValidationConcurrency         *int    `json:"key_validation_concurrency,omitempty"`
-	KeyValidationTimeoutSeconds      *int    `json:"key_validation_timeout_seconds,omitempty"`
-	ActiveProbeEnabled               *bool   `json:"active_probe_enabled,omitempty"`
-	ActiveProbeIntervalSeconds       *int    `json:"active_probe_interval_seconds,omitempty"`
-	ActiveProbeTimeoutSeconds        *int    `json:"active_probe_timeout_seconds,omitempty"`
-	ActiveProbeWindowMinutes         *int    `json:"active_probe_window_minutes,omitempty"`
-	ActiveProbeFailureRateLimit      *int    `json:"active_probe_failure_rate_limit,omitempty"`
-	ActiveProbeIdlePeriods           *string `json:"active_probe_idle_periods,omitempty" name:"config.active_probe_idle_periods" desc:"config.active_probe_idle_periods_desc"`
-	EnableRequestBodyLogging         *bool   `json:"enable_request_body_logging,omitempty"`
+	RequestTimeout                        *int     `json:"request_timeout,omitempty"`
+	IdleConnTimeout                       *int     `json:"idle_conn_timeout,omitempty"`
+	ConnectTimeout                        *int     `json:"connect_timeout,omitempty"`
+	MaxIdleConns                          *int     `json:"max_idle_conns,omitempty"`
+	MaxIdleConnsPerHost                   *int     `json:"max_idle_conns_per_host,omitempty"`
+	ResponseHeaderTimeout                 *int     `json:"response_header_timeout,omitempty"`
+	StreamFirstVisibleTimeoutSeconds      *int     `json:"stream_first_visible_timeout_seconds,omitempty"`
+	StreamTimeoutFailurePenaltyMultiplier *float64 `json:"stream_timeout_failure_penalty_multiplier,omitempty"`
+	ProxyURL                              *string  `json:"proxy_url,omitempty"`
+	MaxRetries                            *int     `json:"max_retries,omitempty"`
+	BlacklistThreshold                    *int     `json:"blacklist_threshold,omitempty"`
+	KeyValidationIntervalMinutes          *int     `json:"key_validation_interval_minutes,omitempty"`
+	KeyValidationConcurrency              *int     `json:"key_validation_concurrency,omitempty"`
+	KeyValidationTimeoutSeconds           *int     `json:"key_validation_timeout_seconds,omitempty"`
+	ActiveProbeEnabled                    *bool    `json:"active_probe_enabled,omitempty"`
+	ActiveProbeIntervalSeconds            *int     `json:"active_probe_interval_seconds,omitempty"`
+	ActiveProbeTimeoutSeconds             *int     `json:"active_probe_timeout_seconds,omitempty"`
+	ActiveProbeWindowMinutes              *int     `json:"active_probe_window_minutes,omitempty"`
+	ActiveProbeFailureRateLimit           *int     `json:"active_probe_failure_rate_limit,omitempty"`
+	ActiveProbeIdlePeriods                *string  `json:"active_probe_idle_periods,omitempty" name:"config.active_probe_idle_periods" desc:"config.active_probe_idle_periods_desc"`
+	EnableRequestBodyLogging              *bool    `json:"enable_request_body_logging,omitempty"`
 }
 
 // KeyConfig 存储仅对单个密钥生效的配置覆盖。
@@ -119,6 +120,7 @@ type Group struct {
 	HeaderRules         datatypes.JSON       `gorm:"type:json" json:"header_rules"`
 	ModelRedirectRules  datatypes.JSONMap    `gorm:"type:json" json:"model_redirect_rules"`
 	ModelRedirectStrict bool                 `gorm:"default:false" json:"model_redirect_strict"`
+	StreamTimeoutRules  datatypes.JSONMap    `gorm:"type:json" json:"stream_timeout_rules"`
 	APIKeys             []APIKey             `gorm:"foreignKey:GroupID" json:"api_keys"`
 	SubGroups           []GroupSubGroup      `gorm:"-" json:"sub_groups,omitempty"`
 	LastValidatedAt     *time.Time           `json:"last_validated_at"`
@@ -143,7 +145,7 @@ type APIKey struct {
 	Config              datatypes.JSONMap `gorm:"type:json" json:"config"`
 	ProbeParamOverrides datatypes.JSONMap `gorm:"type:json" json:"probe_param_overrides"`
 	RequestCount        int64             `gorm:"not null;default:0" json:"request_count"`
-	FailureCount        int64             `gorm:"not null;default:0" json:"failure_count"`
+	FailureCount        float64           `gorm:"type:double;not null;default:0" json:"failure_count"`
 	LastUsedAt          *time.Time        `gorm:"index:idx_api_keys_group_last_used_id,priority:2" json:"last_used_at"`
 	LastValidatedAt     *time.Time        `gorm:"index" json:"last_validated_at"`
 	LastProbeAt         *time.Time        `gorm:"index" json:"last_probe_at"`
@@ -165,27 +167,29 @@ const (
 
 // RequestLog 对应 request_logs 表
 type RequestLog struct {
-	ID              string    `gorm:"type:varchar(36);primaryKey" json:"id"`
-	Timestamp       time.Time `gorm:"not null;index" json:"timestamp"`
-	GroupID         uint      `gorm:"not null;index" json:"group_id"`
-	GroupName       string    `gorm:"type:varchar(255);index" json:"group_name"`
-	ParentGroupID   uint      `gorm:"index" json:"parent_group_id"`
-	ParentGroupName string    `gorm:"type:varchar(255);index" json:"parent_group_name"`
-	KeyValue        string    `gorm:"type:text" json:"key_value"`
-	KeyHash         string    `gorm:"type:varchar(128);index" json:"key_hash"`
-	KeyNote         string    `gorm:"->;-:migration;column:key_note" json:"key_note"`
-	Model           string    `gorm:"type:varchar(255);index" json:"model"`
-	IsSuccess       bool      `gorm:"not null" json:"is_success"`
-	SourceIP        string    `gorm:"type:varchar(64)" json:"source_ip"`
-	StatusCode      int       `gorm:"not null" json:"status_code"`
-	RequestPath     string    `gorm:"type:varchar(500)" json:"request_path"`
-	Duration        int64     `gorm:"not null" json:"duration_ms"`
-	ErrorMessage    string    `gorm:"type:text" json:"error_message"`
-	UserAgent       string    `gorm:"type:varchar(512)" json:"user_agent"`
-	RequestType     string    `gorm:"type:varchar(20);not null;default:'final';index" json:"request_type"`
-	UpstreamAddr    string    `gorm:"type:varchar(500)" json:"upstream_addr"`
-	IsStream        bool      `gorm:"not null" json:"is_stream"`
-	RequestBody     string    `gorm:"type:text" json:"request_body"`
+	ID                    string    `gorm:"type:varchar(36);primaryKey" json:"id"`
+	Timestamp             time.Time `gorm:"not null;index" json:"timestamp"`
+	GroupID               uint      `gorm:"not null;index" json:"group_id"`
+	GroupName             string    `gorm:"type:varchar(255);index" json:"group_name"`
+	ParentGroupID         uint      `gorm:"index" json:"parent_group_id"`
+	ParentGroupName       string    `gorm:"type:varchar(255);index" json:"parent_group_name"`
+	KeyValue              string    `gorm:"type:text" json:"key_value"`
+	KeyHash               string    `gorm:"type:varchar(128);index" json:"key_hash"`
+	KeyNote               string    `gorm:"->;-:migration;column:key_note" json:"key_note"`
+	Model                 string    `gorm:"type:varchar(255);index" json:"model"`
+	EffectiveModel        string    `gorm:"type:varchar(255);index" json:"effective_model"`
+	IsSuccess             bool      `gorm:"not null" json:"is_success"`
+	SourceIP              string    `gorm:"type:varchar(64)" json:"source_ip"`
+	StatusCode            int       `gorm:"not null" json:"status_code"`
+	RequestPath           string    `gorm:"type:varchar(500)" json:"request_path"`
+	Duration              int64     `gorm:"not null" json:"duration_ms"`
+	FirstVisibleLatencyMs *int64    `gorm:"column:first_visible_latency_ms" json:"first_visible_latency_ms,omitempty"`
+	ErrorMessage          string    `gorm:"type:text" json:"error_message"`
+	UserAgent             string    `gorm:"type:varchar(512)" json:"user_agent"`
+	RequestType           string    `gorm:"type:varchar(20);not null;default:'final';index" json:"request_type"`
+	UpstreamAddr          string    `gorm:"type:varchar(500)" json:"upstream_addr"`
+	IsStream              bool      `gorm:"not null" json:"is_stream"`
+	RequestBody           string    `gorm:"type:text" json:"request_body"`
 }
 
 // StatCard 用于仪表盘的单个统计卡片数据

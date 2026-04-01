@@ -99,6 +99,7 @@ type GroupCreateParams struct {
 	ProbeParamOverrides map[string]any
 	ModelRedirectRules  map[string]string
 	ModelRedirectStrict bool
+	StreamTimeoutRules  map[string]int
 	Config              map[string]any
 	HeaderRules         []models.HeaderRule
 	ProxyKeys           string
@@ -122,6 +123,7 @@ type GroupUpdateParams struct {
 	ProbeParamOverrides map[string]any
 	ModelRedirectRules  map[string]string
 	ModelRedirectStrict *bool
+	StreamTimeoutRules  map[string]int
 	Config              map[string]any
 	HeaderRules         *[]models.HeaderRule
 	ProxyKeys           *string
@@ -150,10 +152,17 @@ type RequestStats struct {
 
 // GroupStats aggregates all per-group metrics for dashboard usage.
 type GroupStats struct {
-	KeyStats    KeyStats     `json:"key_stats"`
-	Stats24Hour RequestStats `json:"stats_24_hour"`
-	Stats7Day   RequestStats `json:"stats_7_day"`
-	Stats30Day  RequestStats `json:"stats_30_day"`
+	KeyStats                KeyStats                `json:"key_stats"`
+	Stats24Hour             RequestStats            `json:"stats_24_hour"`
+	Stats7Day               RequestStats            `json:"stats_7_day"`
+	Stats30Day              RequestStats            `json:"stats_30_day"`
+	StreamFirstVisibleStats []ModelFirstVisibleStat `json:"stream_first_visible_stats,omitempty"`
+}
+
+type ModelFirstVisibleStat struct {
+	Model            string `json:"model"`
+	AverageLatencyMs int64  `json:"average_latency_ms"`
+	SampleCount      int64  `json:"sample_count"`
 }
 
 // ConfigOption describes a configurable override exposed to clients.
@@ -162,6 +171,8 @@ type ConfigOption struct {
 	Name         string
 	Description  string
 	DefaultValue any
+	Type         string
+	MinValue     *int
 }
 
 // CreateGroup validates and persists a new group.
@@ -234,6 +245,14 @@ func (s *GroupService) CreateGroup(ctx context.Context, params GroupCreateParams
 		return nil, NewI18nError(app_errors.ErrValidation, "validation.invalid_model_redirect", map[string]any{"error": err.Error()})
 	}
 
+	normalizedStreamTimeoutRules, err := normalizeStreamTimeoutRules(params.StreamTimeoutRules)
+	if err != nil {
+		return nil, NewI18nError(app_errors.ErrValidation, "validation.invalid_stream_timeout_rules", map[string]any{"error": err.Error()})
+	}
+	if groupType == "aggregate" && len(normalizedStreamTimeoutRules) > 0 {
+		return nil, NewI18nError(app_errors.ErrValidation, "validation.aggregate_no_stream_timeout_rules", nil)
+	}
+
 	normalizedProbeParamOverrides, err := s.normalizeProbeParamOverrides(params.ProbeParamOverrides)
 	if err != nil {
 		return nil, err
@@ -253,6 +272,7 @@ func (s *GroupService) CreateGroup(ctx context.Context, params GroupCreateParams
 		ProbeParamOverrides: normalizedProbeParamOverrides,
 		ModelRedirectRules:  convertToJSONMap(params.ModelRedirectRules),
 		ModelRedirectStrict: params.ModelRedirectStrict,
+		StreamTimeoutRules:  convertIntMapToJSONMap(normalizedStreamTimeoutRules),
 		Config:              cleanedConfig,
 		HeaderRules:         headerRulesJSON,
 		ProxyKeys:           strings.TrimSpace(params.ProxyKeys),
@@ -463,6 +483,17 @@ func (s *GroupService) UpdateGroup(ctx context.Context, id uint, params GroupUpd
 			return nil, NewI18nError(app_errors.ErrValidation, "validation.invalid_model_redirect", map[string]any{"error": err.Error()})
 		}
 		group.ModelRedirectRules = convertToJSONMap(params.ModelRedirectRules)
+	}
+
+	if params.StreamTimeoutRules != nil {
+		normalizedStreamTimeoutRules, err := normalizeStreamTimeoutRules(params.StreamTimeoutRules)
+		if err != nil {
+			return nil, NewI18nError(app_errors.ErrValidation, "validation.invalid_stream_timeout_rules", map[string]any{"error": err.Error()})
+		}
+		if group.GroupType == "aggregate" && len(normalizedStreamTimeoutRules) > 0 {
+			return nil, NewI18nError(app_errors.ErrValidation, "validation.aggregate_no_stream_timeout_rules", nil)
+		}
+		group.StreamTimeoutRules = convertIntMapToJSONMap(normalizedStreamTimeoutRules)
 	}
 
 	if params.ModelRedirectStrict != nil {
@@ -783,6 +814,14 @@ func (s *GroupService) getStandardGroupStats(ctx context.Context, groupID uint) 
 		allErrors = append(allErrors, errs...)
 	}
 
+	streamFirstVisibleStats, err := s.fetchStreamFirstVisibleStats(ctx, groupID)
+	if err != nil {
+		allErrors = append(allErrors, fmt.Errorf("failed to get stream first visible stats: %w", err))
+		logrus.WithContext(ctx).WithError(err).Warn("failed to fetch stream first visible stats")
+	} else {
+		stats.StreamFirstVisibleStats = streamFirstVisibleStats
+	}
+
 	// Handle errors
 	if len(allErrors) > 0 {
 		logrus.WithContext(ctx).WithError(allErrors[0]).Error("errors occurred while fetching group stats")
@@ -791,6 +830,47 @@ func (s *GroupService) getStandardGroupStats(ctx context.Context, groupID uint) 
 			return stats, nil
 		}
 		return nil, NewI18nError(app_errors.ErrDatabase, "database.group_stats_failed", nil)
+	}
+
+	return stats, nil
+}
+
+func (s *GroupService) fetchStreamFirstVisibleStats(ctx context.Context, groupID uint) ([]ModelFirstVisibleStat, error) {
+	var rows []struct {
+		Model            string
+		AverageLatencyMs float64
+		SampleCount      int64
+	}
+
+	modelExpr := "CASE WHEN effective_model IS NOT NULL AND effective_model != '' THEN effective_model ELSE model END"
+	if err := s.db.WithContext(ctx).
+		Model(&models.RequestLog{}).
+		Select(modelExpr+" AS model, AVG(first_visible_latency_ms) AS average_latency_ms, COUNT(*) AS sample_count").
+		// 这里只统计成功的最终流式请求，主动探测日志使用 request_type=probe，不会混入平均值。
+		Where(
+			"group_id = ? AND request_type = ? AND is_success = ? AND is_stream = ? AND first_visible_latency_ms IS NOT NULL",
+			groupID,
+			models.RequestTypeFinal,
+			true,
+			true,
+		).
+		Group(modelExpr).
+		Order("sample_count DESC, model ASC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	stats := make([]ModelFirstVisibleStat, 0, len(rows))
+	for _, row := range rows {
+		model := strings.TrimSpace(row.Model)
+		if model == "" {
+			continue
+		}
+		stats = append(stats, ModelFirstVisibleStat{
+			Model:            model,
+			AverageLatencyMs: int64(math.Round(row.AverageLatencyMs)),
+			SampleCount:      row.SampleCount,
+		})
 	}
 
 	return stats, nil
@@ -869,6 +949,8 @@ func (s *GroupService) GetGroupConfigOptions() ([]ConfigOption, error) {
 			Name:         name,
 			Description:  description,
 			DefaultValue: defaultValue,
+			Type:         definition.Type,
+			MinValue:     definition.MinValue,
 		})
 	}
 
@@ -1019,6 +1101,34 @@ func calculateRequestStats(total, failed int64) RequestStats {
 	return stats
 }
 
+func normalizeStreamTimeoutRules(rules map[string]int) (map[string]int, error) {
+	if len(rules) == 0 {
+		return nil, nil
+	}
+
+	normalized := make(map[string]int, len(rules))
+	for rawKey, timeout := range rules {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			return nil, fmt.Errorf("model rule key cannot be empty")
+		}
+		if timeout < 0 {
+			return nil, fmt.Errorf("timeout for model '%s' must be greater than or equal to 0", key)
+		}
+		if strings.Contains(key, "*") {
+			if !strings.HasSuffix(key, "*") || strings.Count(key, "*") > 1 {
+				return nil, fmt.Errorf("wildcard rule '%s' must use a single trailing *", key)
+			}
+			if strings.TrimSpace(strings.TrimSuffix(key, "*")) == "" {
+				return nil, fmt.Errorf("wildcard rule '%s' must include a non-empty prefix", key)
+			}
+		}
+		normalized[key] = timeout
+	}
+
+	return normalized, nil
+}
+
 func (s *GroupService) generateUniqueGroupName(ctx context.Context, baseName string) string {
 	var groups []models.Group
 	if err := s.db.WithContext(ctx).Select("name").Find(&groups).Error; err != nil {
@@ -1093,6 +1203,18 @@ func convertToJSONMap(input map[string]string) datatypes.JSONMap {
 	}
 
 	result := make(datatypes.JSONMap)
+	for k, v := range input {
+		result[k] = v
+	}
+	return result
+}
+
+func convertIntMapToJSONMap(input map[string]int) datatypes.JSONMap {
+	if len(input) == 0 {
+		return datatypes.JSONMap{}
+	}
+
+	result := make(datatypes.JSONMap, len(input))
 	for k, v := range input {
 		result[k] = v
 	}

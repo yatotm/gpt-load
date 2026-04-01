@@ -15,7 +15,7 @@ services:
       DATABASE_DSN: ${DATABASE_DSN:-root:${MYSQL_ROOT_PASSWORD:-123456}@tcp(mysql:3306)/${MYSQL_DATABASE:-gpt-load}?charset=utf8mb4&parseTime=True&loc=Local}
       REDIS_DSN: ${REDIS_DSN:-redis://redis:6379/0}
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://127.0.0.1:3001}
-      VITE_VERSION: ${APP_VERSION:-v2.0.3}
+      VITE_VERSION: ${APP_VERSION:-v2.0.4}
     volumes:
       - ./:/app:cached
       - gpt_load_app_data:/app/data

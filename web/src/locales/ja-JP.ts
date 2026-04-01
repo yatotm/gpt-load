@@ -382,6 +382,29 @@ export default {
     modelRedirectInvalidFormat:
       "モデルリダイレクトルールのキーと値はすべて文字列である必要があります",
     modelRedirectEmptyModel: "モデル名を空にすることはできません",
+    streamTimeoutRules: "モデル別初回可視出力タイムアウトルール",
+    streamTimeoutRulesTooltip:
+      "実際に上流へ転送されるモデル名ごとに、ストリーム初回可視出力タイムアウト秒数を設定します。完全一致と末尾 * の前方一致をサポートします",
+    streamTimeoutRulesDescription:
+      "キーはモデル名または前方一致ルール、値はタイムアウト秒数です。優先順位は完全一致、次に最長前方一致、最後にグループ既定値です",
+    streamTimeoutRulesInvalidJson: "モデル別初回可視出力タイムアウトルールのJSON形式が無効です",
+    streamTimeoutRulesInvalidFormat:
+      "モデル別初回可視出力タイムアウトルールの値は 0 以上の整数秒である必要があります",
+    streamTimeoutRulesEmptyModel:
+      "モデル別初回可視出力タイムアウトルールのモデル名を空にすることはできません",
+    streamTimeoutRulesInvalidWildcard:
+      "モデル別初回可視出力タイムアウトルールは完全一致、または末尾が * の前方一致のみサポートします",
+    duplicateStreamTimeoutRule:
+      "モデル別初回可視出力タイムアウトルールに重複したモデルまたは前方一致ルールがあります",
+    addStreamTimeoutRule: "モデル別初回可視出力タイムアウトルールを追加",
+    streamTimeoutRuleModelPlaceholder:
+      "モデル名。例: gemini-2.5-flash または gemini-2.5-pro*",
+    streamTimeoutRuleTimeoutPlaceholder: "タイムアウト秒数",
+    streamFirstVisibleStats: "モデル別初回可視出力平均",
+    streamFirstVisibleStatsEmpty:
+      "集計対象のサンプルがまだありません。ここでは成功した最終ストリーミングリクエストのみを集計し、アクティブプローブや過去の旧ログは含みません。",
+    averageFirstVisibleLatency: "平均初回可視出力時間",
+    sampleCount: "サンプル数",
     never: "使用なし",
     daysAgo: "{days}日前",
     hoursAgo: "{hours}時間前",

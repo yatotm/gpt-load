@@ -366,6 +366,24 @@ export default {
     modelRedirectInvalidJson: "模型重定向规则 JSON 格式错误",
     modelRedirectInvalidFormat: "模型重定向规则的键值必须都是字符串",
     modelRedirectEmptyModel: "模型名称不能为空",
+    streamTimeoutRules: "模型首字超时规则",
+    streamTimeoutRulesTooltip:
+      "按实际转发到上游的模型名配置流式首个可见输出超时秒数。支持精确匹配，也支持以后缀 * 表示前缀匹配",
+    streamTimeoutRulesDescription:
+      "键为模型名或前缀规则，值为超时秒数。匹配优先级为精确名称优先，其次最长前缀匹配，最后回退到分组默认值",
+    streamTimeoutRulesInvalidJson: "模型首字超时规则 JSON 格式错误",
+    streamTimeoutRulesInvalidFormat: "模型首字超时规则的值必须是大于等于 0 的整数秒数",
+    streamTimeoutRulesEmptyModel: "模型首字超时规则中的模型名称不能为空",
+    streamTimeoutRulesInvalidWildcard: "模型首字超时规则仅支持精确名称，或以 * 结尾的前缀匹配",
+    duplicateStreamTimeoutRule: "模型首字超时规则中存在重复的模型或前缀规则",
+    addStreamTimeoutRule: "添加模型首字超时规则",
+    streamTimeoutRuleModelPlaceholder: "模型名，例如 gemini-2.5-flash 或 gemini-2.5-pro*",
+    streamTimeoutRuleTimeoutPlaceholder: "超时秒数",
+    streamFirstVisibleStats: "模型首字平均值",
+    streamFirstVisibleStatsEmpty:
+      "暂无可统计样本。这里只统计成功的最终流式请求；主动探测和历史旧日志不会计入。",
+    averageFirstVisibleLatency: "平均首字耗时",
+    sampleCount: "样本数",
     never: "从未",
     daysAgo: "{days}天前",
     hoursAgo: "{hours}小时前",
@@ -433,8 +451,7 @@ export default {
     keyConfigOverridesPlaceholder:
       '｛\n  "active_probe_enabled": false,\n  "blacklist_threshold": 0\n｝',
     keyProbeParamOverrides: "单 Key 主动探测参数覆盖",
-    keyProbeParamOverridesHint:
-      "仅在该 Key 的主动探测请求中生效，留空或填写空对象表示继承分组。",
+    keyProbeParamOverridesHint: "仅在该 Key 的主动探测请求中生效，留空或填写空对象表示继承分组。",
     keyProbeParamOverridesDescription:
       "适合为少数特殊 Key 单独降低 thinking、限制输出或覆盖探测时的请求参数，不会影响用户正常请求。",
     keyProbeParamOverridesPlaceholder:

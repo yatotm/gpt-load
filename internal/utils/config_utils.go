@@ -101,6 +101,12 @@ func SetFieldFromString(fieldValue reflect.Value, value string) error {
 			return fmt.Errorf("invalid integer value '%s': %w", value, err)
 		}
 		fieldValue.SetInt(int64(intVal))
+	case reflect.Float64:
+		floatVal, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("invalid float value '%s': %w", value, err)
+		}
+		fieldValue.SetFloat(floatVal)
 	case reflect.Bool:
 		boolVal, err := strconv.ParseBool(value)
 		if err != nil {

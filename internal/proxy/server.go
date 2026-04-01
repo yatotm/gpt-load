@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"gpt-load/internal/channel"
@@ -34,6 +35,11 @@ type ProxyServer struct {
 	channelFactory    *channel.Factory
 	requestLogService *services.RequestLogService
 	encryptionSvc     encryption.Service
+}
+
+type requestLogOptions struct {
+	EffectiveModel        string
+	FirstVisibleLatencyMs *int64
 }
 
 // NewProxyServer creates a new proxy server
@@ -130,7 +136,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	if err != nil {
 		logrus.Errorf("Failed to select a key for group %s on attempt %d: %v", group.Name, retryCount+1, err)
 		response.Error(c, app_errors.NewAPIError(app_errors.ErrNoKeysAvailable, err.Error()))
-		ps.logRequest(c, originalGroup, group, nil, startTime, http.StatusServiceUnavailable, err, isStream, "", channelHandler, bodyBytes, models.RequestTypeFinal)
+		ps.logRequest(c, originalGroup, group, nil, startTime, http.StatusServiceUnavailable, err, isStream, "", channelHandler, bodyBytes, models.RequestTypeFinal, nil)
 		return
 	}
 
@@ -140,13 +146,39 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		return
 	}
 
+	previewReq, err := http.NewRequest(c.Request.Method, upstreamURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		logrus.Errorf("Failed to create upstream request: %v", err)
+		response.Error(c, app_errors.ErrInternalServer)
+		return
+	}
+	previewReq.Header = c.Request.Header.Clone()
+
+	// Clean up client auth key
+	previewReq.Header.Del("Authorization")
+	previewReq.Header.Del("X-Api-Key")
+	previewReq.Header.Del("X-Goog-Api-Key")
+
+	// Apply model redirection
+	finalBodyBytes, err := channelHandler.ApplyModelRedirect(previewReq, bodyBytes, group)
+	effectiveModel := extractModelFromRequest(channelHandler, previewReq, finalBodyBytes)
+	logOptions := &requestLogOptions{
+		EffectiveModel: effectiveModel,
+	}
+	if err != nil {
+		response.Error(c, app_errors.NewAPIError(app_errors.ErrBadRequest, err.Error()))
+		ps.logRequest(c, originalGroup, group, apiKey, startTime, http.StatusBadRequest, err, isStream, previewReq.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
+		return
+	}
+
 	var ctx context.Context
 	var cancel context.CancelFunc
 	var streamStartGuard *streamStartGuard
 	if isStream {
+		timeoutSeconds := resolveStreamFirstVisibleTimeoutSeconds(group, effectiveModel)
 		ctx, cancel = context.WithCancel(c.Request.Context())
 		streamStartGuard = newStreamStartGuard(
-			time.Duration(cfg.StreamFirstVisibleTimeoutSeconds)*time.Second,
+			time.Duration(timeoutSeconds)*time.Second,
 			cancel,
 		)
 	} else {
@@ -158,34 +190,17 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		defer streamStartGuard.Stop()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, c.Request.Method, upstreamURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, c.Request.Method, previewReq.URL.String(), bytes.NewReader(finalBodyBytes))
 	if err != nil {
 		logrus.Errorf("Failed to create upstream request: %v", err)
 		response.Error(c, app_errors.ErrInternalServer)
 		return
 	}
-	req.ContentLength = int64(len(bodyBytes))
-
+	req.ContentLength = int64(len(finalBodyBytes))
 	req.Header = c.Request.Header.Clone()
-
-	// Clean up client auth key
 	req.Header.Del("Authorization")
 	req.Header.Del("X-Api-Key")
 	req.Header.Del("X-Goog-Api-Key")
-
-	// Apply model redirection
-	finalBodyBytes, err := channelHandler.ApplyModelRedirect(req, bodyBytes, group)
-	if err != nil {
-		response.Error(c, app_errors.NewAPIError(app_errors.ErrBadRequest, err.Error()))
-		ps.logRequest(c, originalGroup, group, apiKey, startTime, http.StatusBadRequest, err, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
-		return
-	}
-
-	// Update request body if it was modified by redirection
-	if !bytes.Equal(finalBodyBytes, bodyBytes) {
-		req.Body = io.NopCloser(bytes.NewReader(finalBodyBytes))
-		req.ContentLength = int64(len(finalBodyBytes))
-	}
 
 	channelHandler.ModifyRequest(req, apiKey, group)
 
@@ -203,6 +218,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		client = channelHandler.GetHTTPClient()
 	}
 
+	attemptStart := time.Now()
 	resp, err := client.Do(req)
 	if resp != nil {
 		defer resp.Body.Close()
@@ -215,7 +231,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	if err != nil || (resp != nil && resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound) {
 		if err != nil && !isStreamFirstVisibleTimeoutError(err) && app_errors.IsIgnorableError(err) {
 			logrus.Debugf("Client-side ignorable error for key %s, aborting retries: %v", utils.MaskAPIKey(apiKey.KeyValue), err)
-			ps.logRequest(c, originalGroup, group, apiKey, startTime, 499, err, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+			ps.logRequest(c, originalGroup, group, apiKey, startTime, 499, err, isStream, req.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
 			return
 		}
 
@@ -256,7 +272,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 			requestType = models.RequestTypeFinal
 		}
 
-		ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, errors.New(parsedError), isStream, upstreamURL, channelHandler, bodyBytes, requestType)
+		ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, errors.New(parsedError), isStream, req.URL.String(), channelHandler, bodyBytes, requestType, logOptions)
 
 		// 如果是最后一次尝试，直接返回错误，不再递归
 		if isLastAttempt {
@@ -281,10 +297,10 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		ps.handleModelListResponse(c, resp, group, channelHandler)
 	} else {
 		if isStream {
-			streamResult := ps.handleStreamingResponse(c, resp, streamStartGuard)
+			streamResult := ps.handleStreamingResponse(c, resp, streamStartGuard, attemptStart)
 			if streamResult.Err != nil {
 				if app_errors.IsIgnorableError(streamResult.Err) {
-					ps.logRequest(c, originalGroup, group, apiKey, startTime, 499, streamResult.Err, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+					ps.logRequest(c, originalGroup, group, apiKey, startTime, 499, streamResult.Err, isStream, req.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
 					return
 				}
 				if streamResult.Retryable {
@@ -297,7 +313,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 						requestType = models.RequestTypeFinal
 					}
 
-					ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, streamResult.Err, isStream, upstreamURL, channelHandler, bodyBytes, requestType)
+					ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, streamResult.Err, isStream, req.URL.String(), channelHandler, bodyBytes, requestType, logOptions)
 
 					if isLastAttempt {
 						response.Error(c, app_errors.NewAPIErrorWithUpstream(statusCode, "UPSTREAM_TIMEOUT", streamResult.Err.Error()))
@@ -312,16 +328,17 @@ func (ps *ProxyServer) executeRequestWithRetry(
 				if app_errors.IsIgnorableError(streamResult.Err) {
 					statusCode = 499
 				}
-				ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, streamResult.Err, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+				ps.logRequest(c, originalGroup, group, apiKey, startTime, statusCode, streamResult.Err, isStream, req.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
 				return
 			}
+			logOptions.FirstVisibleLatencyMs = durationMillisPtr(streamResult.FirstVisibleLatency)
 		} else {
 			ps.writeResponseHeaders(c, resp)
 			ps.handleNormalResponse(c, resp)
 		}
 	}
 
-	ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+	ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, req.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
 }
 
 // logRequest is a helper function to create and record a request log.
@@ -338,6 +355,7 @@ func (ps *ProxyServer) logRequest(
 	channelHandler channel.ChannelProxy,
 	bodyBytes []byte,
 	requestType string,
+	options *requestLogOptions,
 ) {
 	if ps.requestLogService == nil {
 		return
@@ -376,6 +394,15 @@ func (ps *ProxyServer) logRequest(
 	if channelHandler != nil && bodyBytes != nil {
 		logEntry.Model = channelHandler.ExtractModel(c, bodyBytes)
 	}
+	if options != nil {
+		logEntry.EffectiveModel = strings.TrimSpace(options.EffectiveModel)
+	}
+	if logEntry.EffectiveModel == "" {
+		logEntry.EffectiveModel = logEntry.Model
+	}
+	if logEntry.IsSuccess && logEntry.IsStream && options != nil && options.FirstVisibleLatencyMs != nil {
+		logEntry.FirstVisibleLatencyMs = options.FirstVisibleLatencyMs
+	}
 
 	if apiKey != nil {
 		// 加密密钥值用于日志存储
@@ -397,4 +424,76 @@ func (ps *ProxyServer) logRequest(
 	if err := ps.requestLogService.Record(logEntry); err != nil {
 		logrus.Errorf("Failed to record request log: %v", err)
 	}
+}
+
+func extractModelFromRequest(channelHandler channel.ChannelProxy, req *http.Request, bodyBytes []byte) string {
+	if channelHandler == nil || req == nil {
+		return ""
+	}
+	tmpContext := &gin.Context{Request: req}
+	return strings.TrimSpace(channelHandler.ExtractModel(tmpContext, bodyBytes))
+}
+
+func resolveStreamFirstVisibleTimeoutSeconds(group *models.Group, effectiveModel string) int {
+	if group == nil {
+		return 0
+	}
+	defaultTimeout := group.EffectiveConfig.StreamFirstVisibleTimeoutSeconds
+	if len(group.StreamTimeoutRules) == 0 {
+		return defaultTimeout
+	}
+
+	normalizedModel := strings.TrimSpace(effectiveModel)
+	if normalizedModel == "" {
+		return defaultTimeout
+	}
+
+	longestPrefixLen := -1
+	longestPrefixTimeout := defaultTimeout
+	for rawKey, rawValue := range group.StreamTimeoutRules {
+		rule := strings.TrimSpace(rawKey)
+		timeout, ok := jsonNumberToInt(rawValue)
+		if !ok {
+			continue
+		}
+		if strings.HasSuffix(rule, "*") {
+			prefix := strings.TrimSuffix(rule, "*")
+			if strings.HasPrefix(normalizedModel, prefix) && len(prefix) > longestPrefixLen {
+				longestPrefixLen = len(prefix)
+				longestPrefixTimeout = timeout
+			}
+			continue
+		}
+		if rule == normalizedModel {
+			return timeout
+		}
+	}
+
+	if longestPrefixLen >= 0 {
+		return longestPrefixTimeout
+	}
+	return defaultTimeout
+}
+
+func jsonNumberToInt(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), float64(int(v)) == v
+	default:
+		return 0, false
+	}
+}
+
+func durationMillisPtr(duration time.Duration) *int64 {
+	if duration <= 0 {
+		return nil
+	}
+	milliseconds := duration.Milliseconds()
+	return &milliseconds
 }

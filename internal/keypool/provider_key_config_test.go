@@ -69,7 +69,7 @@ func TestHandleFailureUsesKeySpecificBlacklistThreshold(t *testing.T) {
 	}
 	group.EffectiveConfig = provider.settingsManager.GetEffectiveConfig(group.Config)
 
-	if err := provider.handleFailure(&models.APIKey{ID: key.ID}, group, keyHashKey); err != nil {
+	if err := provider.handleFailure(&models.APIKey{ID: key.ID}, group, keyHashKey, 1); err != nil {
 		t.Fatalf("handleFailure returned error: %v", err)
 	}
 
@@ -81,6 +81,53 @@ func TestHandleFailureUsesKeySpecificBlacklistThreshold(t *testing.T) {
 		t.Fatalf("expected key to remain active, got %s", updated.Status)
 	}
 	if updated.FailureCount != 1 {
-		t.Fatalf("expected failure count to increase to 1, got %d", updated.FailureCount)
+		t.Fatalf("expected failure count to increase to 1, got %v", updated.FailureCount)
+	}
+}
+
+func TestHandleFailureUsesWeightedPenalty(t *testing.T) {
+	provider, db, dataStore := newTestKeyProviderWithSettings(t)
+
+	key := models.APIKey{
+		GroupID:      9,
+		KeyValue:     "weighted-key",
+		KeyHash:      "hash-weighted",
+		Status:       models.KeyStatusActive,
+		Priority:     models.DefaultAPIKeyPriority,
+		FailureCount: 0,
+		CreatedAt:    time.Now(),
+	}
+	if err := db.Create(&key).Error; err != nil {
+		t.Fatalf("failed to create key: %v", err)
+	}
+
+	keyHashKey := fmt.Sprintf("key:%d", key.ID)
+	if err := dataStore.HSet(keyHashKey, map[string]any{
+		"status":        models.KeyStatusActive,
+		"failure_count": 0,
+		"priority":      models.DefaultAPIKeyPriority,
+	}); err != nil {
+		t.Fatalf("failed to seed key hash: %v", err)
+	}
+
+	group := &models.Group{
+		ID:     key.GroupID,
+		Config: datatypes.JSONMap{"blacklist_threshold": 1},
+	}
+	group.EffectiveConfig = provider.settingsManager.GetEffectiveConfig(group.Config)
+
+	if err := provider.handleFailure(&models.APIKey{ID: key.ID}, group, keyHashKey, 0.5); err != nil {
+		t.Fatalf("handleFailure returned error: %v", err)
+	}
+
+	var updated models.APIKey
+	if err := db.First(&updated, key.ID).Error; err != nil {
+		t.Fatalf("failed to reload key: %v", err)
+	}
+	if updated.Status != models.KeyStatusActive {
+		t.Fatalf("expected key to remain active, got %s", updated.Status)
+	}
+	if updated.FailureCount != 0.5 {
+		t.Fatalf("expected failure count to increase to 0.5, got %v", updated.FailureCount)
 	}
 }

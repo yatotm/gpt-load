@@ -234,7 +234,7 @@ func (p *KeyProvider) SelectKey(groupID uint) (*models.APIKey, error) {
 				continue
 			}
 
-			failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
+			failureCount := parseFailureCount(keyDetails["failure_count"])
 			createdAt, _ := strconv.ParseInt(keyDetails["created_at"], 10, 64)
 			keyPriority, _ := strconv.Atoi(keyDetails["priority"])
 			keyPriority = normalizePriority(keyPriority)
@@ -280,7 +280,11 @@ func (p *KeyProvider) UpdateStatus(apiKey *models.APIKey, group *models.Group, i
 					"error": errorMessage,
 				}).Debug("Uncounted error, skipping failure handling")
 			} else {
-				if err := p.handleFailure(apiKey, group, keyHashKey); err != nil {
+				penalty := p.failurePenaltyForError(group, errorMessage)
+				if penalty <= 0 {
+					return
+				}
+				if err := p.handleFailure(apiKey, group, keyHashKey, penalty); err != nil {
 					logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "error": err}).Error("Failed to handle key failure")
 				}
 			}
@@ -504,12 +508,12 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 		return fmt.Errorf("failed to get key details from store: %w", err)
 	}
 
-	failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
+	failureCount := parseFailureCount(keyDetails["failure_count"])
 	isActive := keyDetails["status"] == models.KeyStatusActive
 	priority, _ := strconv.Atoi(keyDetails["priority"])
 	priority = normalizePriority(priority)
 
-	if failureCount == 0 && isActive {
+	if failureCount <= 0 && isActive {
 		return nil
 	}
 
@@ -519,7 +523,7 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 			return fmt.Errorf("failed to lock key %d for update: %w", keyID, err)
 		}
 
-		updates := map[string]any{"failure_count": 0}
+		updates := map[string]any{"failure_count": 0.0}
 		if !isActive {
 			updates["status"] = models.KeyStatusActive
 			for field, value := range resetProbeStatsUpdates() {
@@ -549,7 +553,7 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 	})
 }
 
-func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, keyHashKey string) error {
+func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, keyHashKey string, penalty float64) error {
 	keyDetails, err := p.store.HGetAll(keyHashKey)
 	if err != nil {
 		return fmt.Errorf("failed to get key details from store: %w", err)
@@ -559,7 +563,6 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 		return nil
 	}
 
-	failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
 	priority, _ := strconv.Atoi(keyDetails["priority"])
 	priority = normalizePriority(priority)
 
@@ -574,10 +577,10 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 			blacklistThreshold = p.settingsManager.GetEffectiveKeyConfig(group.Config, key.Config).BlacklistThreshold
 		}
 
-		newFailureCount := failureCount + 1
+		newFailureCount := key.FailureCount + penalty
 
 		updates := map[string]any{"failure_count": newFailureCount}
-		shouldBlacklist := blacklistThreshold > 0 && newFailureCount >= int64(blacklistThreshold)
+		shouldBlacklist := blacklistThreshold > 0 && newFailureCount >= float64(blacklistThreshold)
 		if shouldBlacklist {
 			updates["status"] = models.KeyStatusInvalid
 			for field, value := range resetProbeStatsUpdates() {
@@ -589,25 +592,24 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 			return fmt.Errorf("failed to update key stats in DB: %w", err)
 		}
 
-		if _, err := p.store.HIncrBy(keyHashKey, "failure_count", 1); err != nil {
-			return fmt.Errorf("failed to increment failure count in store: %w", err)
-		}
+		storeUpdates := map[string]any{"failure_count": newFailureCount}
 
 		if shouldBlacklist {
 			logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "threshold": blacklistThreshold}).Warn("Key has reached blacklist threshold, disabling.")
 			if err := p.removeActiveKeyFromLists(group.ID, apiKey.ID, priority); err != nil {
 				return fmt.Errorf("failed to remove key from active lists: %w", err)
 			}
-			storeUpdates := map[string]any{"status": models.KeyStatusInvalid}
+			storeUpdates["status"] = models.KeyStatusInvalid
 			for field, value := range resetProbeStatsUpdates() {
 				storeUpdates[field] = value
-			}
-			if err := p.store.HSet(keyHashKey, storeUpdates); err != nil {
-				return fmt.Errorf("failed to update key status to invalid in store: %w", err)
 			}
 			if err := p.clearProbeWindow(apiKey.ID); err != nil {
 				return err
 			}
+		}
+
+		if err := p.store.HSet(keyHashKey, storeUpdates); err != nil {
+			return fmt.Errorf("failed to update key status in store: %w", err)
 		}
 
 		return nil
@@ -1101,6 +1103,30 @@ func (p *KeyProvider) apiKeyToMap(key *models.APIKey) map[string]any {
 		"group_id":      key.GroupID,
 		"created_at":    key.CreatedAt.Unix(),
 	}
+}
+
+func (p *KeyProvider) failurePenaltyForError(group *models.Group, errorMessage string) float64 {
+	if strings.Contains(errorMessage, "stream first visible output timeout") {
+		if group == nil {
+			return 1
+		}
+		if group.EffectiveConfig.StreamTimeoutFailurePenaltyMultiplier < 0 {
+			return 0
+		}
+		return group.EffectiveConfig.StreamTimeoutFailurePenaltyMultiplier
+	}
+	return 1
+}
+
+func parseFailureCount(raw string) float64 {
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 // pluckIDs extracts IDs from a slice of APIKey.

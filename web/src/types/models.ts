@@ -89,6 +89,7 @@ export interface Group {
   probe_param_overrides: Record<string, unknown>;
   model_redirect_rules: Record<string, string>;
   model_redirect_strict: boolean;
+  stream_timeout_rules: Record<string, number>;
   header_rules?: HeaderRule[];
   proxy_keys: string;
   group_type?: GroupType;
@@ -103,6 +104,8 @@ export interface GroupConfigOption {
   name: string;
   description: string;
   default_value: string | number | boolean;
+  type: "int" | "float64" | "string" | "bool";
+  min_value?: number;
 }
 
 // GroupStatsResponse defines the complete statistics for a group.
@@ -111,6 +114,13 @@ export interface GroupStatsResponse {
   stats_24_hour: RequestStats;
   stats_7_day: RequestStats;
   stats_30_day: RequestStats;
+  stream_first_visible_stats?: ModelFirstVisibleStat[];
+}
+
+export interface ModelFirstVisibleStat {
+  model: string;
+  average_latency_ms: number;
+  sample_count: number;
 }
 
 // KeyStats defines the statistics for API keys in a group.
@@ -176,6 +186,8 @@ export interface RequestLog {
   key_value?: string;
   key_note?: string;
   model: string;
+  effective_model?: string;
+  first_visible_latency_ms?: number;
   upstream_addr: string;
   is_stream: boolean;
   request_body?: string;

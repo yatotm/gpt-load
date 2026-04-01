@@ -41,7 +41,7 @@ func TestHandleStreamingResponseRetriesBeforeFirstVisibleOutput(t *testing.T) {
 	}
 
 	server := &ProxyServer{}
-	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(30*time.Millisecond, cancel))
+	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(30*time.Millisecond, cancel), time.Now())
 
 	if !result.Retryable {
 		t.Fatal("expected pre-output timeout to be retryable")
@@ -81,13 +81,16 @@ func TestHandleStreamingResponseCommitsOnGeminiThoughtEvent(t *testing.T) {
 	}
 
 	server := &ProxyServer{}
-	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}))
+	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
 
 	if result.Err != nil {
 		t.Fatalf("expected successful relay, got %v", result.Err)
 	}
 	if !result.Committed {
 		t.Fatal("expected stream to be committed after thought output")
+	}
+	if result.FirstVisibleLatency <= 0 {
+		t.Fatalf("expected first visible latency to be recorded, got %v", result.FirstVisibleLatency)
 	}
 	body := recorder.Body.String()
 	if strings.Contains(body, ": ping") {
@@ -125,7 +128,7 @@ func TestHandleStreamingResponseBuffersMetadataBeforeVisibleOutput(t *testing.T)
 	}
 
 	server := &ProxyServer{}
-	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}))
+	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
 
 	if result.Err != nil {
 		t.Fatalf("expected successful relay, got %v", result.Err)

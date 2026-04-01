@@ -327,6 +327,13 @@ function formatDuration(ms: number): string {
   return result;
 }
 
+function formatFailureCount(count: number): string {
+  if (Number.isInteger(count)) {
+    return String(count);
+  }
+  return count.toFixed(2).replace(/\.?0+$/, "");
+}
+
 function toggleKeyVisibility(key: KeyRow) {
   key.is_visible = !key.is_visible;
 }
@@ -348,6 +355,14 @@ function hasKeyOverrides(key: KeyRow): boolean {
 
 function getKeyConfigOption(key: string) {
   return keyConfigOptions.value.find(option => option.key === key);
+}
+
+function getKeyConfigPrecision(key: string): number | undefined {
+  return getKeyConfigOption(key)?.type === "int" ? 0 : 2;
+}
+
+function getKeyConfigStep(key: string): number {
+  return getKeyConfigOption(key)?.type === "int" ? 1 : 0.1;
 }
 
 function buildConfigItems(config: Record<string, unknown> | undefined): KeyConfigItem[] {
@@ -415,7 +430,9 @@ function getEditingOverrideSummary(): string {
     try {
       probeCount = Object.keys(JSON.parse(probeText) as Record<string, unknown>).length;
     } catch {
-      probeCount = editingKey.value ? Object.keys(editingKey.value.probe_param_overrides || {}).length : 0;
+      probeCount = editingKey.value
+        ? Object.keys(editingKey.value.probe_param_overrides || {}).length
+        : 0;
     }
   }
 
@@ -474,7 +491,8 @@ async function saveKeyMeta() {
       return;
     }
 
-    let nextProbeParamOverrides: Record<string, unknown> = editingKey.value.probe_param_overrides || {};
+    let nextProbeParamOverrides: Record<string, unknown> =
+      editingKey.value.probe_param_overrides || {};
 
     if (probeOverridesChanged) {
       if (!nextProbeOverridesText) {
@@ -903,15 +921,31 @@ function resetPage() {
               <span class="priority-num">{{ key.priority }}</span>
               <span class="status-dot" :class="getStatusClass(key.status)" />
               <code class="key-mono" :title="key.key_value">{{ getKeyDisplayValue(key) }}</code>
-              <span v-if="hasKeyOverrides(key)" class="override-tag">{{ t("keys.overrideShort") }}</span>
-              <span v-if="getNoteText(key)" class="note-tag" :title="getNoteText(key)">{{ getNoteText(key) }}</span>
+              <span v-if="hasKeyOverrides(key)" class="override-tag">
+                {{ t("keys.overrideShort") }}
+              </span>
+              <span v-if="getNoteText(key)" class="note-tag" :title="getNoteText(key)">
+                {{ getNoteText(key) }}
+              </span>
               <span class="row-spacer" />
               <span class="icon-actions">
-                <n-button size="tiny" text @click="openKeyEditor(key)" :title="t('keys.editKeyMeta')">
+                <n-button
+                  size="tiny"
+                  text
+                  @click="openKeyEditor(key)"
+                  :title="t('keys.editKeyMeta')"
+                >
                   <template #icon><n-icon :component="Pencil" /></template>
                 </n-button>
-                <n-button size="tiny" text @click="toggleKeyVisibility(key)" :title="t('keys.showHide')">
-                  <template #icon><n-icon :component="key.is_visible ? EyeOffOutline : EyeOutline" /></template>
+                <n-button
+                  size="tiny"
+                  text
+                  @click="toggleKeyVisibility(key)"
+                  :title="t('keys.showHide')"
+                >
+                  <template #icon>
+                    <n-icon :component="key.is_visible ? EyeOffOutline : EyeOutline" />
+                  </template>
                 </n-button>
                 <n-button size="tiny" text @click="copyKey(key)" :title="t('common.copy')">
                   <template #icon><n-icon :component="CopyOutline" /></template>
@@ -921,22 +955,49 @@ function resetPage() {
 
             <!-- Row 2: Metrics -->
             <div class="row-metrics">
-              <span class="metric">{{ t('keys.requestsShort') }} <strong>{{ key.request_count }}</strong></span>
+              <span class="metric">
+                {{ t("keys.requestsShort") }}
+                <strong>{{ key.request_count }}</strong>
+              </span>
               <span class="metric-sep" />
-              <span class="metric">{{ t('keys.failuresShort') }} <strong>{{ key.failure_count }}</strong></span>
+              <span class="metric">
+                {{ t("keys.failuresShort") }}
+                <strong>{{ formatFailureCount(key.failure_count) }}</strong>
+              </span>
               <span class="metric-sep" />
-              <span class="metric">{{ t('keys.rateShort') }} <strong>{{ getProbeRateSummary(key) }}</strong></span>
+              <span class="metric">
+                {{ t("keys.rateShort") }}
+                <strong>{{ getProbeRateSummary(key) }}</strong>
+              </span>
               <span class="metric-sep" />
-              <span class="metric">{{ t('keys.probeLastShort') }} <strong :title="key.last_probe_error || ''">{{ getLastProbeText(key) }}</strong></span>
+              <span class="metric">
+                {{ t("keys.probeLastShort") }}
+                <strong :title="key.last_probe_error || ''">{{ getLastProbeText(key) }}</strong>
+              </span>
               <span class="metric-sep" />
-              <span class="metric">{{ t('keys.usedShort') }} <strong>{{ getLastUsedText(key) }}</strong></span>
+              <span class="metric">
+                {{ t("keys.usedShort") }}
+                <strong>{{ getLastUsedText(key) }}</strong>
+              </span>
             </div>
 
             <!-- Row 3: Action buttons -->
             <div class="row-actions">
-              <n-button tertiary type="info" size="tiny" @click="testKey(key)">{{ t('keys.testShort') }}</n-button>
-              <n-button v-if="key.status !== 'active'" tertiary size="tiny" type="warning" @click="restoreKey(key)">{{ t('keys.restoreShort') }}</n-button>
-              <n-button tertiary size="tiny" type="error" @click="deleteKey(key)">{{ t('common.deleteShort') }}</n-button>
+              <n-button tertiary type="info" size="tiny" @click="testKey(key)">
+                {{ t("keys.testShort") }}
+              </n-button>
+              <n-button
+                v-if="key.status !== 'active'"
+                tertiary
+                size="tiny"
+                type="warning"
+                @click="restoreKey(key)"
+              >
+                {{ t("keys.restoreShort") }}
+              </n-button>
+              <n-button tertiary size="tiny" type="error" @click="deleteKey(key)">
+                {{ t("common.deleteShort") }}
+              </n-button>
             </div>
           </article>
         </div>
@@ -1042,7 +1103,12 @@ function resetPage() {
           <div class="editor-basic-row">
             <div class="edit-field-inline">
               <div class="edit-label">{{ t("keys.priority") }}</div>
-              <n-input-number v-model:value="editingPriority" :min="1" size="small" style="width: 100px" />
+              <n-input-number
+                v-model:value="editingPriority"
+                :min="1"
+                size="small"
+                style="width: 100px"
+              />
             </div>
             <div class="edit-field-inline" style="flex: 1; min-width: 0">
               <div class="edit-label">{{ t("keys.notes") }}</div>
@@ -1065,7 +1131,11 @@ function resetPage() {
                 {{ t("keys.keyConfigOverridesHint") }}
               </div>
             </div>
-            <n-icon :component="ChevronDown" class="collapse-icon" :class="{ open: configPanelOpen }" />
+            <n-icon
+              :component="ChevronDown"
+              class="collapse-icon"
+              :class="{ open: configPanelOpen }"
+            />
           </div>
 
           <div v-if="configPanelOpen" class="collapsible-body">
@@ -1083,9 +1153,8 @@ function resetPage() {
                         label: option.name,
                         value: option.key,
                         disabled:
-                          editingConfigItems
-                            .map(item => item.key)
-                            .includes(option.key) && option.key !== configItem.key,
+                          editingConfigItems.map(item => item.key).includes(option.key) &&
+                          option.key !== configItem.key,
                       }))
                     "
                     :placeholder="t('keys.selectConfigParam')"
@@ -1100,12 +1169,16 @@ function resetPage() {
                         v-if="typeof configItem.value === 'number'"
                         v-model:value="configItem.value"
                         :placeholder="t('keys.paramValue')"
-                        :precision="0"
+                        :precision="getKeyConfigPrecision(configItem.key)"
+                        :step="getKeyConfigStep(configItem.key)"
+                        :min="getKeyConfigOption(configItem.key)?.min_value"
                         style="width: 100%"
                       />
                       <div v-else-if="typeof configItem.value === 'boolean'" class="config-switch">
                         <n-switch v-model:value="configItem.value" size="small" />
-                        <span>{{ configItem.value ? t("keys.switchOn") : t("keys.switchOff") }}</span>
+                        <span>
+                          {{ configItem.value ? t("keys.switchOn") : t("keys.switchOff") }}
+                        </span>
                       </div>
                       <n-input
                         v-else
@@ -1113,7 +1186,9 @@ function resetPage() {
                         :placeholder="t('keys.paramValue')"
                       />
                     </template>
-                    {{ getKeyConfigOption(configItem.key)?.description || t("keys.setConfigValue") }}
+                    {{
+                      getKeyConfigOption(configItem.key)?.description || t("keys.setConfigValue")
+                    }}
                   </n-tooltip>
                 </div>
                 <div class="config-actions">
@@ -1163,7 +1238,11 @@ function resetPage() {
                 </template>
                 {{ t("keys.keyProbeParamOverridesDescription") }}
               </n-tooltip>
-              <n-icon :component="ChevronDown" class="collapse-icon" :class="{ open: probePanelOpen }" />
+              <n-icon
+                :component="ChevronDown"
+                class="collapse-icon"
+                :class="{ open: probePanelOpen }"
+              />
             </div>
           </div>
 
@@ -1325,7 +1404,7 @@ function resetPage() {
 }
 
 .key-mono {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
   font-size: 12px;
   color: var(--text-primary);
   white-space: nowrap;
@@ -1455,7 +1534,7 @@ function resetPage() {
 
 .editor-hero-value {
   margin-top: 4px;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
   font-size: 13px;
   line-height: 1.4;
   color: var(--text-primary, #111827);

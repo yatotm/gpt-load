@@ -382,6 +382,27 @@ export default {
     modelRedirectInvalidJson: "Invalid JSON format for model redirect rules",
     modelRedirectInvalidFormat: "Model redirect rule keys and values must all be strings",
     modelRedirectEmptyModel: "Model name cannot be empty",
+    streamTimeoutRules: "Model Stream Timeout Rules",
+    streamTimeoutRulesTooltip:
+      "Configure stream first-visible-output timeout seconds by actual upstream model. Supports exact match and trailing * prefix rules",
+    streamTimeoutRulesDescription:
+      "Keys are model names or prefix rules, values are timeout seconds. Priority is exact match first, then longest prefix match, then the group default",
+    streamTimeoutRulesInvalidJson: "Invalid JSON format for model stream timeout rules",
+    streamTimeoutRulesInvalidFormat:
+      "Model stream timeout rule values must be integers greater than or equal to 0",
+    streamTimeoutRulesEmptyModel: "Model name in stream timeout rules cannot be empty",
+    streamTimeoutRulesInvalidWildcard:
+      "Model stream timeout rules only support exact model names or prefix rules ending with *",
+    duplicateStreamTimeoutRule: "Duplicate model or prefix rule in stream timeout rules",
+    addStreamTimeoutRule: "Add Stream Timeout Rule",
+    streamTimeoutRuleModelPlaceholder:
+      "Model name, e.g. gemini-2.5-flash or gemini-2.5-pro*",
+    streamTimeoutRuleTimeoutPlaceholder: "Timeout seconds",
+    streamFirstVisibleStats: "Model First Visible Averages",
+    streamFirstVisibleStatsEmpty:
+      "No samples yet. This section only counts successful final streaming requests; active probes and older logs are not included.",
+    averageFirstVisibleLatency: "Average First Visible Latency",
+    sampleCount: "Samples",
     never: "Never",
     daysAgo: "{days} days ago",
     hoursAgo: "{hours} hours ago",
@@ -437,7 +458,8 @@ export default {
     singleKeySettings: "Per-key settings",
     keyFingerprint: "Key fingerprint",
     basicSettings: "Basic settings",
-    basicSettingsHint: "Only overrides this key's priority and notes without changing the group defaults.",
+    basicSettingsHint:
+      "Only overrides this key's priority and notes without changing the group defaults.",
     keyInheritSummary: "Inheriting group defaults",
     keyOverrideSummary: "{configCount} config overrides / {probeCount} probe override specs",
     keyConfigEmptyHint:

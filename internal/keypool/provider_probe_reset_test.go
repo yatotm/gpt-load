@@ -177,7 +177,7 @@ func TestHandleFailureClearsProbeStatsAndWindowWhenBlacklisting(t *testing.T) {
 	}
 	group.EffectiveConfig = provider.settingsManager.GetEffectiveConfig(group.Config)
 
-	if err := provider.handleFailure(&models.APIKey{ID: key.ID}, group, keyHashKey); err != nil {
+	if err := provider.handleFailure(&models.APIKey{ID: key.ID}, group, keyHashKey, 1); err != nil {
 		t.Fatalf("handleFailure returned error: %v", err)
 	}
 

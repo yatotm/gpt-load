@@ -4,7 +4,7 @@ export interface Setting {
   key: string;
   name: string;
   value: string | number | boolean;
-  type: "int" | "string" | "bool";
+  type: "int" | "float64" | "string" | "bool";
   min_value?: number;
   description: string;
   required: boolean;
