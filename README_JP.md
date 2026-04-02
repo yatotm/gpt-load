@@ -54,7 +54,7 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    yatotm1994/gpt-load:v2.0.4
+    yatotm1994/gpt-load:v2.0.5
 ```
 
 > `your-secure-key-here`を強力なパスワードに変更してください（デフォルト値は絶対に使用しないでください）。その後、管理インターフェースにログインできます：<http://localhost:3001>

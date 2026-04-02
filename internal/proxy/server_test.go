@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"testing"
 
 	"gpt-load/internal/models"
@@ -15,9 +16,9 @@ func TestResolveStreamFirstVisibleTimeoutSeconds(t *testing.T) {
 			StreamFirstVisibleTimeoutSeconds: 120,
 		},
 		StreamTimeoutRules: datatypes.JSONMap{
-			"gemini-2.5-flash": 30,
-			"gemini-2.5-pro*":  180,
-			"gemini-*":         90,
+			"gemini-2.5-flash": json.Number("30"),
+			"gemini-2.5-pro*":  json.Number("180"),
+			"gemini-*":         "90",
 		},
 	}
 
@@ -32,5 +33,32 @@ func TestResolveStreamFirstVisibleTimeoutSeconds(t *testing.T) {
 	}
 	if timeout := resolveStreamFirstVisibleTimeoutSeconds(group, "claude-3-7-sonnet"); timeout != 120 {
 		t.Fatalf("expected default timeout 120, got %d", timeout)
+	}
+}
+
+func TestJSONNumberToInt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    any
+		expected int
+		ok       bool
+	}{
+		{name: "json number", input: json.Number("20"), expected: 20, ok: true},
+		{name: "string", input: "30", expected: 30, ok: true},
+		{name: "float64 integer", input: 40.0, expected: 40, ok: true},
+		{name: "float64 non-integer", input: 40.5, expected: 0, ok: false},
+		{name: "invalid string", input: "abc", expected: 0, ok: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			value, ok := jsonNumberToInt(tc.input)
+			if ok != tc.ok {
+				t.Fatalf("expected ok=%v, got %v", tc.ok, ok)
+			}
+			if value != tc.expected {
+				t.Fatalf("expected value=%d, got %d", tc.expected, value)
+			}
+		})
 	}
 }

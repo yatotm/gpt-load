@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -479,12 +480,52 @@ func jsonNumberToInt(value any) (int, bool) {
 	switch v := value.(type) {
 	case int:
 		return v, true
+	case int8:
+		return int(v), true
+	case int16:
+		return int(v), true
 	case int32:
 		return int(v), true
 	case int64:
 		return int(v), true
+	case uint:
+		return int(v), true
+	case uint8:
+		return int(v), true
+	case uint16:
+		return int(v), true
+	case uint32:
+		return int(v), true
+	case uint64:
+		if v > uint64(^uint(0)>>1) {
+			return 0, false
+		}
+		return int(v), true
+	case float32:
+		if float32(int(v)) != v {
+			return 0, false
+		}
+		return int(v), true
 	case float64:
-		return int(v), float64(int(v)) == v
+		if float64(int(v)) != v {
+			return 0, false
+		}
+		return int(v), true
+	case json.Number:
+		number, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		if int64(int(number)) != number {
+			return 0, false
+		}
+		return int(number), true
+	case string:
+		number, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0, false
+		}
+		return number, true
 	default:
 		return 0, false
 	}
