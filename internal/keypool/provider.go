@@ -1,6 +1,7 @@
 package keypool
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"gpt-load/internal/config"
@@ -24,6 +25,15 @@ type KeyProvider struct {
 	store           store.Store
 	settingsManager *config.SystemSettingsManager
 	encryptionSvc   encryption.Service
+}
+
+type failureWindowEntry struct {
+	Timestamp int64   `json:"timestamp"`
+	Penalty   float64 `json:"penalty"`
+}
+
+type failureWindowState struct {
+	Entries []failureWindowEntry `json:"entries"`
 }
 
 type ProbeStatusUpdate struct {
@@ -75,6 +85,10 @@ func probeWindowStoreKey(keyID uint) string {
 	return fmt.Sprintf("key:%d:probe_window", keyID)
 }
 
+func failureWindowStoreKey(keyID uint) string {
+	return fmt.Sprintf("key:%d:failure_window", keyID)
+}
+
 func resetProbeStatsUpdates() map[string]any {
 	return map[string]any{
 		"probe_failure_rate": 0,
@@ -85,6 +99,13 @@ func resetProbeStatsUpdates() map[string]any {
 func (p *KeyProvider) clearProbeWindow(keyID uint) error {
 	if err := p.store.Delete(probeWindowStoreKey(keyID)); err != nil {
 		return fmt.Errorf("failed to clear probe window for key %d: %w", keyID, err)
+	}
+	return nil
+}
+
+func (p *KeyProvider) clearFailureWindow(keyID uint) error {
+	if err := p.store.Delete(failureWindowStoreKey(keyID)); err != nil {
+		return fmt.Errorf("failed to clear failure window for key %d: %w", keyID, err)
 	}
 	return nil
 }
@@ -292,6 +313,45 @@ func (p *KeyProvider) UpdateStatus(apiKey *models.APIKey, group *models.Group, i
 	}()
 }
 
+// UpdateRequestSuccess 在普通请求成功后重置连续失败计数，并刷新窗口失败快照。
+func (p *KeyProvider) UpdateRequestSuccess(apiKey *models.APIKey, group *models.Group) {
+	if apiKey == nil || group == nil {
+		return
+	}
+	go func() {
+		keyHashKey := fmt.Sprintf("key:%d", apiKey.ID)
+		if err := p.handleRequestSuccess(apiKey.ID, group, keyHashKey); err != nil {
+			logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "error": err}).Error("Failed to handle request success")
+		}
+	}()
+}
+
+// UpdateRequestFailure 在普通请求失败后更新窗口失败累计和连续失败次数。
+func (p *KeyProvider) UpdateRequestFailure(apiKey *models.APIKey, group *models.Group, errorMessage string) {
+	if apiKey == nil || group == nil {
+		return
+	}
+	go func() {
+		if app_errors.IsUnCounted(errorMessage) {
+			logrus.WithFields(logrus.Fields{
+				"keyID": apiKey.ID,
+				"error": errorMessage,
+			}).Debug("Uncounted request error, skipping failure handling")
+			return
+		}
+
+		penalty := p.failurePenaltyForError(group, errorMessage)
+		if penalty <= 0 {
+			return
+		}
+
+		keyHashKey := fmt.Sprintf("key:%d", apiKey.ID)
+		if err := p.handleFailure(apiKey, group, keyHashKey, penalty); err != nil {
+			logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "error": err}).Error("Failed to handle request failure")
+		}
+	}()
+}
+
 func (p *KeyProvider) UpdateKeyPriority(keyID uint, priority int) (*models.APIKey, error) {
 	priority = normalizePriority(priority)
 
@@ -442,6 +502,7 @@ func (p *KeyProvider) UpdateProbeStatus(apiKey *models.APIKey, update ProbeStatu
 			statusChanged = true
 		} else if shouldBlacklist && key.Status == models.KeyStatusActive {
 			updates["status"] = models.KeyStatusInvalid
+			updates["failure_count"] = 0
 			moveToInvalid = true
 			statusChanged = true
 		}
@@ -454,6 +515,11 @@ func (p *KeyProvider) UpdateProbeStatus(apiKey *models.APIKey, update ProbeStatu
 			storeUpdates := map[string]any{"status": updates["status"]}
 			if restoreToActive {
 				storeUpdates["failure_count"] = 0
+				storeUpdates["consecutive_failure_count"] = 0
+			}
+			if moveToInvalid {
+				storeUpdates["failure_count"] = 0
+				storeUpdates["consecutive_failure_count"] = 0
 			}
 			if err := p.store.HSet(keyHashKey, storeUpdates); err != nil {
 				return fmt.Errorf("failed to update key status in store: %w", err)
@@ -461,11 +527,17 @@ func (p *KeyProvider) UpdateProbeStatus(apiKey *models.APIKey, update ProbeStatu
 		}
 
 		if restoreToActive {
+			if err := p.clearFailureWindow(apiKey.ID); err != nil {
+				return err
+			}
 			if err := p.addActiveKeyToLists(key.GroupID, key.ID, key.Priority); err != nil {
 				return fmt.Errorf("failed to restore key to active lists after probe: %w", err)
 			}
 		}
 		if moveToInvalid {
+			if err := p.clearFailureWindow(apiKey.ID); err != nil {
+				return err
+			}
 			if err := p.removeActiveKeyFromLists(key.GroupID, key.ID, key.Priority); err != nil {
 				return fmt.Errorf("failed to remove key from active lists after probe: %w", err)
 			}
@@ -509,12 +581,13 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 	}
 
 	failureCount := parseFailureCount(keyDetails["failure_count"])
+	consecutiveFailureCount := parseConsecutiveFailureCount(keyDetails["consecutive_failure_count"])
 	isActive := keyDetails["status"] == models.KeyStatusActive
 	priority, _ := strconv.Atoi(keyDetails["priority"])
 	priority = normalizePriority(priority)
 
-	if failureCount <= 0 && isActive {
-		return nil
+	if failureCount <= 0 && consecutiveFailureCount <= 0 && isActive {
+		return p.clearFailureWindow(keyID)
 	}
 
 	return p.executeTransactionWithRetry(func(tx *gorm.DB) error {
@@ -535,8 +608,19 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 			return fmt.Errorf("failed to update key in DB: %w", err)
 		}
 
+		if err := p.clearFailureWindow(keyID); err != nil {
+			return err
+		}
+
+		storeUpdates := map[string]any{
+			"failure_count":             0.0,
+			"consecutive_failure_count": 0,
+		}
 		if err := p.store.HSet(keyHashKey, updates); err != nil {
 			return fmt.Errorf("failed to update key details in store: %w", err)
+		}
+		if err := p.store.HSet(keyHashKey, storeUpdates); err != nil {
+			return fmt.Errorf("failed to reset key request failure state in store: %w", err)
 		}
 
 		if !isActive {
@@ -547,6 +631,59 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 			if err := p.addActiveKeyToLists(key.GroupID, keyID, priority); err != nil {
 				return fmt.Errorf("failed to restore key to active lists: %w", err)
 			}
+		}
+
+		return nil
+	})
+}
+
+func (p *KeyProvider) handleRequestSuccess(keyID uint, group *models.Group, keyHashKey string) error {
+	return p.executeTransactionWithRetry(func(tx *gorm.DB) error {
+		var key models.APIKey
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&key, keyID).Error; err != nil {
+			return fmt.Errorf("failed to lock key %d for request success update: %w", keyID, err)
+		}
+
+		if key.Status == models.KeyStatusInvalid {
+			return nil
+		}
+
+		effectiveConfig := group.EffectiveConfig
+		if p.settingsManager != nil {
+			effectiveConfig = p.settingsManager.GetEffectiveKeyConfig(group.Config, key.Config)
+		}
+
+		windowFailureCount, err := p.snapshotFailureWindow(keyID, effectiveConfig.BlacklistWindowMinutes, time.Now())
+		if err != nil {
+			return err
+		}
+
+		keyDetails, err := p.store.HGetAll(keyHashKey)
+		if err != nil {
+			return fmt.Errorf("failed to get key details from store: %w", err)
+		}
+		consecutiveFailureCount := parseConsecutiveFailureCount(keyDetails["consecutive_failure_count"])
+
+		updates := map[string]any{}
+		if key.FailureCount != windowFailureCount {
+			updates["failure_count"] = windowFailureCount
+		}
+		if len(updates) > 0 {
+			if err := tx.Model(&key).Updates(updates).Error; err != nil {
+				return fmt.Errorf("failed to update key request success snapshot in DB: %w", err)
+			}
+		}
+
+		if consecutiveFailureCount <= 0 && len(updates) == 0 {
+			return nil
+		}
+
+		storeUpdates := map[string]any{"consecutive_failure_count": 0}
+		if len(updates) > 0 {
+			storeUpdates["failure_count"] = windowFailureCount
+		}
+		if err := p.store.HSet(keyHashKey, storeUpdates); err != nil {
+			return fmt.Errorf("failed to update key request success state in store: %w", err)
 		}
 
 		return nil
@@ -572,15 +709,26 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 			return fmt.Errorf("failed to lock key %d for update: %w", apiKey.ID, err)
 		}
 
-		blacklistThreshold := group.EffectiveConfig.BlacklistThreshold
+		effectiveConfig := group.EffectiveConfig
 		if p.settingsManager != nil {
-			blacklistThreshold = p.settingsManager.GetEffectiveKeyConfig(group.Config, key.Config).BlacklistThreshold
+			effectiveConfig = p.settingsManager.GetEffectiveKeyConfig(group.Config, key.Config)
 		}
 
-		newFailureCount := key.FailureCount + penalty
+		windowFailureCount, err := p.recordFailureWindow(apiKey.ID, effectiveConfig.BlacklistWindowMinutes, penalty, time.Now())
+		if err != nil {
+			return err
+		}
 
-		updates := map[string]any{"failure_count": newFailureCount}
-		shouldBlacklist := blacklistThreshold > 0 && newFailureCount >= float64(blacklistThreshold)
+		keyDetails, err := p.store.HGetAll(keyHashKey)
+		if err != nil {
+			return fmt.Errorf("failed to get key details from store: %w", err)
+		}
+		newConsecutiveFailureCount := parseConsecutiveFailureCount(keyDetails["consecutive_failure_count"]) + 1
+
+		updates := map[string]any{"failure_count": windowFailureCount}
+		shouldBlacklistByWindow := effectiveConfig.BlacklistThreshold > 0 && windowFailureCount >= float64(effectiveConfig.BlacklistThreshold)
+		shouldBlacklistByConsecutive := effectiveConfig.ConsecutiveFailureThreshold > 0 && newConsecutiveFailureCount >= effectiveConfig.ConsecutiveFailureThreshold
+		shouldBlacklist := shouldBlacklistByWindow || shouldBlacklistByConsecutive
 		if shouldBlacklist {
 			updates["status"] = models.KeyStatusInvalid
 			for field, value := range resetProbeStatsUpdates() {
@@ -592,18 +740,31 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 			return fmt.Errorf("failed to update key stats in DB: %w", err)
 		}
 
-		storeUpdates := map[string]any{"failure_count": newFailureCount}
+		storeUpdates := map[string]any{
+			"failure_count":             windowFailureCount,
+			"consecutive_failure_count": newConsecutiveFailureCount,
+		}
 
 		if shouldBlacklist {
-			logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "threshold": blacklistThreshold}).Warn("Key has reached blacklist threshold, disabling.")
+			logrus.WithFields(logrus.Fields{
+				"keyID":                     apiKey.ID,
+				"window_threshold":          effectiveConfig.BlacklistThreshold,
+				"window_failure_count":      windowFailureCount,
+				"consecutive_threshold":     effectiveConfig.ConsecutiveFailureThreshold,
+				"consecutive_failure_count": newConsecutiveFailureCount,
+			}).Warn("Key has reached blacklist threshold, disabling.")
 			if err := p.removeActiveKeyFromLists(group.ID, apiKey.ID, priority); err != nil {
 				return fmt.Errorf("failed to remove key from active lists: %w", err)
 			}
 			storeUpdates["status"] = models.KeyStatusInvalid
+			storeUpdates["consecutive_failure_count"] = 0
 			for field, value := range resetProbeStatsUpdates() {
 				storeUpdates[field] = value
 			}
 			if err := p.clearProbeWindow(apiKey.ID); err != nil {
+				return err
+			}
+			if err := p.clearFailureWindow(apiKey.ID); err != nil {
 				return err
 			}
 		}
@@ -837,6 +998,10 @@ func (p *KeyProvider) RestoreKeys(groupID uint) (int64, error) {
 				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to restore key in store after DB update, rolling back transaction")
 				return err
 			}
+			if err := p.clearFailureWindow(key.ID); err != nil {
+				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to clear failure window after restoring key, rolling back transaction")
+				return err
+			}
 			if err := p.clearProbeWindow(key.ID); err != nil {
 				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to clear probe window after restoring key, rolling back transaction")
 				return err
@@ -897,6 +1062,10 @@ func (p *KeyProvider) RestoreMultipleKeys(groupID uint, keyValues []string) (int
 			key.FailureCount = 0
 			if err := p.addKeyToStore(&key); err != nil {
 				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to restore key in store after DB update")
+				return err
+			}
+			if err := p.clearFailureWindow(key.ID); err != nil {
+				logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Error("Failed to clear failure window after restoring key")
 				return err
 			}
 			if err := p.clearProbeWindow(key.ID); err != nil {
@@ -994,6 +1163,18 @@ func (p *KeyProvider) RemoveKeysFromStore(groupID uint, keyIDs []uint) error {
 				"error": err,
 			}).Error("Failed to delete key hash")
 		}
+		if err := p.clearFailureWindow(keyID); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"keyID": keyID,
+				"error": err,
+			}).Warn("Failed to delete failure window")
+		}
+		if err := p.clearProbeWindow(keyID); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"keyID": keyID,
+				"error": err,
+			}).Warn("Failed to delete probe window")
+		}
 	}
 
 	logrus.WithFields(logrus.Fields{
@@ -1089,19 +1270,26 @@ func (p *KeyProvider) removeKeyFromStore(key *models.APIKey) error {
 	if err := p.store.Delete(keyHashKey); err != nil {
 		return fmt.Errorf("failed to delete key HASH for key %d: %w", key.ID, err)
 	}
+	if err := p.clearProbeWindow(key.ID); err != nil {
+		logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Warn("Failed to clear probe window while removing key")
+	}
+	if err := p.clearFailureWindow(key.ID); err != nil {
+		logrus.WithFields(logrus.Fields{"keyID": key.ID, "error": err}).Warn("Failed to clear failure window while removing key")
+	}
 	return nil
 }
 
 // apiKeyToMap converts an APIKey model to a map for HSET.
 func (p *KeyProvider) apiKeyToMap(key *models.APIKey) map[string]any {
 	return map[string]any{
-		"id":            fmt.Sprint(key.ID),
-		"key_string":    key.KeyValue,
-		"status":        key.Status,
-		"priority":      normalizePriority(key.Priority),
-		"failure_count": key.FailureCount,
-		"group_id":      key.GroupID,
-		"created_at":    key.CreatedAt.Unix(),
+		"id":                        fmt.Sprint(key.ID),
+		"key_string":                key.KeyValue,
+		"status":                    key.Status,
+		"priority":                  normalizePriority(key.Priority),
+		"failure_count":             key.FailureCount,
+		"consecutive_failure_count": 0,
+		"group_id":                  key.GroupID,
+		"created_at":                key.CreatedAt.Unix(),
 	}
 }
 
@@ -1127,6 +1315,129 @@ func parseFailureCount(raw string) float64 {
 		return 0
 	}
 	return value
+}
+
+func parseConsecutiveFailureCount(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err == nil {
+		return value
+	}
+	floatValue, floatErr := strconv.ParseFloat(raw, 64)
+	if floatErr != nil {
+		return 0
+	}
+	return int(floatValue)
+}
+
+func (p *KeyProvider) loadFailureWindowState(keyID uint) (failureWindowState, error) {
+	raw, err := p.store.Get(failureWindowStoreKey(keyID))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return failureWindowState{}, nil
+		}
+		return failureWindowState{}, fmt.Errorf("failed to load failure window for key %d: %w", keyID, err)
+	}
+	if len(raw) == 0 {
+		return failureWindowState{}, nil
+	}
+
+	var state failureWindowState
+	if err := json.Unmarshal(raw, &state); err == nil {
+		return state, nil
+	}
+
+	var legacyEntries []failureWindowEntry
+	if err := json.Unmarshal(raw, &legacyEntries); err == nil {
+		return failureWindowState{Entries: legacyEntries}, nil
+	}
+
+	return failureWindowState{}, fmt.Errorf("failed to unmarshal failure window for key %d", keyID)
+}
+
+func pruneFailureWindowEntries(entries []failureWindowEntry, cutoff int64) []failureWindowEntry {
+	filtered := make([]failureWindowEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Timestamp < cutoff || entry.Penalty <= 0 {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func sumFailureWindowEntries(entries []failureWindowEntry) float64 {
+	var total float64
+	for _, entry := range entries {
+		total += entry.Penalty
+	}
+	return total
+}
+
+func failureWindowTTL(windowMinutes int) time.Duration {
+	ttl := time.Duration(windowMinutes*3) * time.Minute
+	if ttl < 10*time.Minute {
+		ttl = 10 * time.Minute
+	}
+	return ttl
+}
+
+func (p *KeyProvider) storeFailureWindowState(keyID uint, windowMinutes int, entries []failureWindowEntry) error {
+	if len(entries) == 0 {
+		return p.clearFailureWindow(keyID)
+	}
+
+	payload, err := json.Marshal(failureWindowState{Entries: entries})
+	if err != nil {
+		return fmt.Errorf("failed to marshal failure window for key %d: %w", keyID, err)
+	}
+	if err := p.store.Set(failureWindowStoreKey(keyID), payload, failureWindowTTL(windowMinutes)); err != nil {
+		return fmt.Errorf("failed to store failure window for key %d: %w", keyID, err)
+	}
+	return nil
+}
+
+func (p *KeyProvider) snapshotFailureWindow(keyID uint, windowMinutes int, now time.Time) (float64, error) {
+	if windowMinutes <= 0 {
+		if err := p.clearFailureWindow(keyID); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+
+	state, err := p.loadFailureWindowState(keyID)
+	if err != nil {
+		return 0, err
+	}
+
+	filtered := pruneFailureWindowEntries(state.Entries, now.Add(-time.Duration(windowMinutes)*time.Minute).Unix())
+	if err := p.storeFailureWindowState(keyID, windowMinutes, filtered); err != nil {
+		return 0, err
+	}
+	return sumFailureWindowEntries(filtered), nil
+}
+
+func (p *KeyProvider) recordFailureWindow(keyID uint, windowMinutes int, penalty float64, now time.Time) (float64, error) {
+	if windowMinutes <= 0 {
+		return penalty, nil
+	}
+
+	state, err := p.loadFailureWindowState(keyID)
+	if err != nil {
+		return 0, err
+	}
+
+	filtered := pruneFailureWindowEntries(state.Entries, now.Add(-time.Duration(windowMinutes)*time.Minute).Unix())
+	filtered = append(filtered, failureWindowEntry{
+		Timestamp: now.Unix(),
+		Penalty:   penalty,
+	})
+	if err := p.storeFailureWindowState(keyID, windowMinutes, filtered); err != nil {
+		return 0, err
+	}
+	return sumFailureWindowEntries(filtered), nil
 }
 
 // pluckIDs extracts IDs from a slice of APIKey.

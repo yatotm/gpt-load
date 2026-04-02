@@ -14,10 +14,13 @@ func TestGetEffectiveKeyConfig(t *testing.T) {
 		"active_probe_timeout_seconds":    45,
 		"active_probe_failure_rate_limit": 12,
 		"blacklist_threshold":             3,
+		"blacklist_window_minutes":        15,
+		"consecutive_failure_threshold":   4,
 	}
 	keyConfig := datatypes.JSONMap{
-		"active_probe_enabled": false,
-		"blacklist_threshold":  0,
+		"active_probe_enabled":          false,
+		"blacklist_threshold":           0,
+		"consecutive_failure_threshold": 2,
 	}
 
 	effective := manager.GetEffectiveKeyConfig(groupConfig, keyConfig)
@@ -26,6 +29,12 @@ func TestGetEffectiveKeyConfig(t *testing.T) {
 	}
 	if effective.BlacklistThreshold != 0 {
 		t.Fatalf("expected key override blacklist threshold to be 0, got %d", effective.BlacklistThreshold)
+	}
+	if effective.BlacklistWindowMinutes != 15 {
+		t.Fatalf("expected group override failure window to be inherited, got %d", effective.BlacklistWindowMinutes)
+	}
+	if effective.ConsecutiveFailureThreshold != 2 {
+		t.Fatalf("expected key override consecutive failure threshold to be 2, got %d", effective.ConsecutiveFailureThreshold)
 	}
 	if effective.ActiveProbeTimeoutSeconds != 45 {
 		t.Fatalf("expected group override timeout to be inherited, got %d", effective.ActiveProbeTimeoutSeconds)

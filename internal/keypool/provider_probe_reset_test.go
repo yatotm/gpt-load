@@ -56,15 +56,19 @@ func TestHandleSuccessClearsProbeWindowWhenRecoveringKey(t *testing.T) {
 	}
 	keyHashKey := fmt.Sprintf("key:%d", key.ID)
 	if err := dataStore.HSet(keyHashKey, map[string]any{
-		"status":        models.KeyStatusInvalid,
-		"failure_count": 3,
-		"priority":      models.DefaultAPIKeyPriority,
+		"status":                    models.KeyStatusInvalid,
+		"failure_count":             3,
+		"consecutive_failure_count": 2,
+		"priority":                  models.DefaultAPIKeyPriority,
 	}); err != nil {
 		t.Fatalf("failed to seed key hash: %v", err)
 	}
 	if err := dataStore.Set(probeWindowStoreKey(key.ID), []byte(`[{"timestamp":1,"success":false}]`), time.Minute); err != nil {
 		t.Fatalf("failed to seed probe window: %v", err)
 	}
+	seedFailureWindow(t, dataStore, key.ID, []failureWindowEntry{
+		{Timestamp: time.Now().Unix(), Penalty: 1},
+	})
 
 	if err := provider.handleSuccess(key.ID, keyHashKey); err != nil {
 		t.Fatalf("handleSuccess returned error: %v", err)
@@ -88,6 +92,14 @@ func TestHandleSuccessClearsProbeWindowWhenRecoveringKey(t *testing.T) {
 	if exists {
 		t.Fatal("expected probe window to be deleted")
 	}
+
+	exists, err = dataStore.Exists(failureWindowStoreKey(key.ID))
+	if err != nil {
+		t.Fatalf("failed to check failure window: %v", err)
+	}
+	if exists {
+		t.Fatal("expected failure window to be deleted")
+	}
 }
 
 func TestRestoreMultipleKeysClearsProbeStatsAndWindow(t *testing.T) {
@@ -110,6 +122,9 @@ func TestRestoreMultipleKeysClearsProbeStatsAndWindow(t *testing.T) {
 	if err := dataStore.Set(probeWindowStoreKey(key.ID), []byte(`[{"timestamp":1,"success":false}]`), time.Minute); err != nil {
 		t.Fatalf("failed to seed probe window: %v", err)
 	}
+	seedFailureWindow(t, dataStore, key.ID, []failureWindowEntry{
+		{Timestamp: time.Now().Unix(), Penalty: 1},
+	})
 
 	restored, err := provider.RestoreMultipleKeys(key.GroupID, []string{"restore-key"})
 	if err != nil {
@@ -137,6 +152,14 @@ func TestRestoreMultipleKeysClearsProbeStatsAndWindow(t *testing.T) {
 	if exists {
 		t.Fatal("expected probe window to be deleted")
 	}
+
+	exists, err = dataStore.Exists(failureWindowStoreKey(key.ID))
+	if err != nil {
+		t.Fatalf("failed to check failure window: %v", err)
+	}
+	if exists {
+		t.Fatal("expected failure window to be deleted")
+	}
 }
 
 func TestHandleFailureClearsProbeStatsAndWindowWhenBlacklisting(t *testing.T) {
@@ -159,17 +182,21 @@ func TestHandleFailureClearsProbeStatsAndWindowWhenBlacklisting(t *testing.T) {
 
 	keyHashKey := fmt.Sprintf("key:%d", key.ID)
 	if err := dataStore.HSet(keyHashKey, map[string]any{
-		"status":             models.KeyStatusActive,
-		"failure_count":      0,
-		"priority":           models.DefaultAPIKeyPriority,
-		"probe_failure_rate": 40,
-		"probe_sample_count": 5,
+		"status":                    models.KeyStatusActive,
+		"failure_count":             0,
+		"consecutive_failure_count": 0,
+		"priority":                  models.DefaultAPIKeyPriority,
+		"probe_failure_rate":        40,
+		"probe_sample_count":        5,
 	}); err != nil {
 		t.Fatalf("failed to seed key hash: %v", err)
 	}
 	if err := dataStore.Set(probeWindowStoreKey(key.ID), []byte(`{"started_at":1,"entries":[{"timestamp":1,"success":false}]}`), time.Minute); err != nil {
 		t.Fatalf("failed to seed probe window: %v", err)
 	}
+	seedFailureWindow(t, dataStore, key.ID, []failureWindowEntry{
+		{Timestamp: time.Now().Unix(), Penalty: 1},
+	})
 
 	group := &models.Group{
 		ID:     key.GroupID,
@@ -198,5 +225,13 @@ func TestHandleFailureClearsProbeStatsAndWindowWhenBlacklisting(t *testing.T) {
 	}
 	if exists {
 		t.Fatal("expected probe window to be deleted after blacklisting")
+	}
+
+	exists, err = dataStore.Exists(failureWindowStoreKey(key.ID))
+	if err != nil {
+		t.Fatalf("failed to check failure window: %v", err)
+	}
+	if exists {
+		t.Fatal("expected failure window to be deleted after blacklisting")
 	}
 }

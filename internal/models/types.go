@@ -38,6 +38,8 @@ type GroupConfig struct {
 	ProxyURL                              *string  `json:"proxy_url,omitempty"`
 	MaxRetries                            *int     `json:"max_retries,omitempty"`
 	BlacklistThreshold                    *int     `json:"blacklist_threshold,omitempty"`
+	BlacklistWindowMinutes                *int     `json:"blacklist_window_minutes,omitempty"`
+	ConsecutiveFailureThreshold           *int     `json:"consecutive_failure_threshold,omitempty"`
 	KeyValidationIntervalMinutes          *int     `json:"key_validation_interval_minutes,omitempty"`
 	KeyValidationConcurrency              *int     `json:"key_validation_concurrency,omitempty"`
 	KeyValidationTimeoutSeconds           *int     `json:"key_validation_timeout_seconds,omitempty"`
@@ -53,6 +55,8 @@ type GroupConfig struct {
 // KeyConfig 存储仅对单个密钥生效的配置覆盖。
 type KeyConfig struct {
 	BlacklistThreshold           *int  `json:"blacklist_threshold,omitempty"`
+	BlacklistWindowMinutes       *int  `json:"blacklist_window_minutes,omitempty"`
+	ConsecutiveFailureThreshold  *int  `json:"consecutive_failure_threshold,omitempty"`
 	KeyValidationIntervalMinutes *int  `json:"key_validation_interval_minutes,omitempty"`
 	KeyValidationTimeoutSeconds  *int  `json:"key_validation_timeout_seconds,omitempty"`
 	ActiveProbeEnabled           *bool `json:"active_probe_enabled,omitempty"`

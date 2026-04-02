@@ -494,6 +494,8 @@ func (sm *SystemSettingsManager) DisplaySystemConfig(settings types.SystemSettin
 	logrus.Info("  --- Key & Group Behavior ---")
 	logrus.Infof("    Max Retries: %d", settings.MaxRetries)
 	logrus.Infof("    Blacklist Threshold: %d", settings.BlacklistThreshold)
+	logrus.Infof("    Blacklist Window: %d minutes", settings.BlacklistWindowMinutes)
+	logrus.Infof("    Consecutive Failure Threshold: %d", settings.ConsecutiveFailureThreshold)
 	logrus.Infof("    Key Validation Interval: %d minutes", settings.KeyValidationIntervalMinutes)
 	logrus.Infof("    Active Probe Enabled: %t", settings.ActiveProbeEnabled)
 	logrus.Infof("    Active Probe Interval: %d seconds", settings.ActiveProbeIntervalSeconds)

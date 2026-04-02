@@ -117,6 +117,8 @@ const configOptionsFetched = ref(false);
 
 const supportedKeyOverrideFields = [
   "blacklist_threshold",
+  "blacklist_window_minutes",
+  "consecutive_failure_threshold",
   "key_validation_interval_minutes",
   "key_validation_timeout_seconds",
   "active_probe_enabled",

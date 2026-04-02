@@ -264,7 +264,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		}
 
 		// 使用解析后的错误信息更新密钥状态
-		ps.keyProvider.UpdateStatus(apiKey, group, false, parsedError)
+		ps.keyProvider.UpdateRequestFailure(apiKey, group, parsedError)
 
 		// 判断是否为最后一次尝试
 		isLastAttempt := retryCount >= cfg.MaxRetries
@@ -290,7 +290,6 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		return
 	}
 
-	// ps.keyProvider.UpdateStatus(apiKey, group, true) // 请求成功不再重置成功次数，减少IO消耗
 	logrus.Debugf("Request for group %s succeeded on attempt %d with key %s", group.Name, retryCount+1, utils.MaskAPIKey(apiKey.KeyValue))
 
 	// Check if this is a model list request (needs special handling)
@@ -305,7 +304,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 					return
 				}
 				if streamResult.Retryable {
-					ps.keyProvider.UpdateStatus(apiKey, group, false, streamResult.Err.Error())
+					ps.keyProvider.UpdateRequestFailure(apiKey, group, streamResult.Err.Error())
 					statusCode := streamRetryableStatusCode(streamResult.Err)
 
 					isLastAttempt := retryCount >= cfg.MaxRetries
@@ -339,6 +338,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		}
 	}
 
+	ps.keyProvider.UpdateRequestSuccess(apiKey, group)
 	ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, req.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
 }
 
