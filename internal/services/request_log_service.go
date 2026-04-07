@@ -3,14 +3,18 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gpt-load/internal/config"
 	"gpt-load/internal/models"
 	"gpt-load/internal/store"
+	"gpt-load/internal/utils"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	mysqlDriver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
@@ -202,6 +206,25 @@ func (s *RequestLogService) writeLogsToDB(logs []*models.RequestLog) error {
 		return nil
 	}
 
+	err := s.writeLogsToDBOnce(logs)
+	if err == nil {
+		return nil
+	}
+
+	if !isIncorrectStringValueError(err) {
+		return err
+	}
+
+	sanitizedLogs := cloneAndSanitizeRequestLogs(logs)
+	if retryErr := s.writeLogsToDBOnce(sanitizedLogs); retryErr != nil {
+		return retryErr
+	}
+
+	logrus.WithError(err).Warn("Request log write hit unsupported database charset, stored sanitized ASCII-safe payload instead")
+	return nil
+}
+
+func (s *RequestLogService) writeLogsToDBOnce(logs []*models.RequestLog) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.CreateInBatches(logs, len(logs)).Error; err != nil {
 			return fmt.Errorf("failed to batch insert request logs: %w", err)
@@ -329,4 +352,82 @@ func (s *RequestLogService) writeLogsToDB(logs []*models.RequestLog) error {
 
 		return nil
 	})
+}
+
+func isIncorrectStringValueError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var mysqlErr *mysqlDriver.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1366 {
+		return true
+	}
+
+	return strings.Contains(err.Error(), "Incorrect string value")
+}
+
+func cloneAndSanitizeRequestLogs(logs []*models.RequestLog) []*models.RequestLog {
+	cloned := make([]*models.RequestLog, 0, len(logs))
+	for _, logEntry := range logs {
+		if logEntry == nil {
+			continue
+		}
+
+		logCopy := *logEntry
+		sanitizeRequestLogForLegacyCharset(&logCopy)
+		cloned = append(cloned, &logCopy)
+	}
+	return cloned
+}
+
+func sanitizeRequestLogForLegacyCharset(logEntry *models.RequestLog) {
+	if logEntry == nil {
+		return
+	}
+
+	logEntry.GroupName = utils.TruncateString(asciiSafeString(logEntry.GroupName), 255)
+	logEntry.ParentGroupName = utils.TruncateString(asciiSafeString(logEntry.ParentGroupName), 255)
+	logEntry.KeyValue = asciiSafeString(logEntry.KeyValue)
+	logEntry.Model = utils.TruncateString(asciiSafeString(logEntry.Model), 255)
+	logEntry.EffectiveModel = utils.TruncateString(asciiSafeString(logEntry.EffectiveModel), 255)
+	logEntry.SourceIP = utils.TruncateString(asciiSafeString(logEntry.SourceIP), 64)
+	logEntry.RequestPath = utils.TruncateString(asciiSafeString(logEntry.RequestPath), 500)
+	logEntry.ErrorMessage = utils.TruncateString(asciiSafeString(logEntry.ErrorMessage), 65535)
+	logEntry.UserAgent = utils.TruncateString(asciiSafeString(logEntry.UserAgent), 512)
+	logEntry.UpstreamAddr = utils.TruncateString(asciiSafeString(logEntry.UpstreamAddr), 500)
+	logEntry.RequestBody = utils.TruncateString(asciiSafeString(logEntry.RequestBody), 65000)
+}
+
+func asciiSafeString(value string) string {
+	if value == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(value))
+
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 {
+			fmt.Fprintf(&builder, "\\x%02X", value[0])
+			value = value[1:]
+			continue
+		}
+
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			builder.WriteRune(r)
+		case r >= 0x20 && r <= 0x7E:
+			builder.WriteRune(r)
+		case r <= 0xFFFF:
+			fmt.Fprintf(&builder, "\\u%04X", r)
+		default:
+			fmt.Fprintf(&builder, "\\U%08X", r)
+		}
+
+		value = value[size:]
+	}
+
+	return builder.String()
 }

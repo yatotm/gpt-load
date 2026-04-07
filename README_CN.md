@@ -54,7 +54,7 @@ docker run -d --name gpt-load \
     -p 3001:3001 \
     -e AUTH_KEY=your-secure-key-here \
     -v "$(pwd)/data":/app/data \
-    yatotm1994/gpt-load:v2.0.6
+    yatotm1994/gpt-load:v2.0.7
 ```
 
 > 请将 `your-secure-key-here` 改为强密码（决不能使用默认值），即可登录管理界面：<http://localhost:3001>

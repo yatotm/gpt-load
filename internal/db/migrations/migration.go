@@ -23,7 +23,11 @@ func MigrateDatabase(db *gorm.DB) error {
 		return err
 	}
 
-	return V1_2_2_EnableWeightedKeyFailures(db)
+	if err := V1_2_2_EnableWeightedKeyFailures(db); err != nil {
+		return err
+	}
+
+	return V1_2_3_EnsureRequestLogsUTF8MB4(db)
 }
 
 // HandleLegacyIndexes removes old indexes from previous versions to prevent migration errors

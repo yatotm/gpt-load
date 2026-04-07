@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaskAPIKey masks an API key for safe logging.
@@ -16,10 +17,18 @@ func MaskAPIKey(key string) string {
 
 // TruncateString shortens a string to a maximum length.
 func TruncateString(s string, maxLength int) string {
-	if len(s) > maxLength {
-		return s[:maxLength]
+	if maxLength <= 0 {
+		return ""
 	}
-	return s
+	if len(s) <= maxLength {
+		return s
+	}
+
+	truncated := s[:maxLength]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }
 
 // SplitAndTrim splits a string by a separator
