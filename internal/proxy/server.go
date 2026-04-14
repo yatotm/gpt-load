@@ -43,6 +43,23 @@ type requestLogOptions struct {
 	FirstVisibleLatencyMs *int64
 }
 
+func resolveStreamSemanticPolicy(group *models.Group, effectiveModel string) streamSemanticPolicy {
+	if group == nil {
+		return streamSemanticPolicy{}
+	}
+
+	if group.ChannelType != "gemini" {
+		return streamSemanticPolicy{}
+	}
+
+	normalizedModel := strings.ToLower(strings.TrimSpace(effectiveModel))
+	if strings.HasPrefix(normalizedModel, "gemini-3.1-pro") {
+		return streamSemanticPolicy{StrictGeminiEmptyResponse: true}
+	}
+
+	return streamSemanticPolicy{}
+}
+
 // NewProxyServer creates a new proxy server
 func NewProxyServer(
 	keyProvider *keypool.KeyProvider,
@@ -166,6 +183,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	logOptions := &requestLogOptions{
 		EffectiveModel: effectiveModel,
 	}
+	streamSemanticPolicy := resolveStreamSemanticPolicy(group, effectiveModel)
 	if err != nil {
 		response.Error(c, app_errors.NewAPIError(app_errors.ErrBadRequest, err.Error()))
 		ps.logRequest(c, originalGroup, group, apiKey, startTime, http.StatusBadRequest, err, isStream, previewReq.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
@@ -297,7 +315,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		ps.handleModelListResponse(c, resp, group, channelHandler)
 	} else {
 		if isStream {
-			streamResult := ps.handleStreamingResponse(c, resp, streamStartGuard, attemptStart)
+			streamResult := ps.handleStreamingResponseWithPolicy(c, resp, streamStartGuard, attemptStart, streamSemanticPolicy)
 			if streamResult.Err != nil {
 				if app_errors.IsIgnorableError(streamResult.Err) {
 					ps.logRequest(c, originalGroup, group, apiKey, startTime, 499, streamResult.Err, isStream, req.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)

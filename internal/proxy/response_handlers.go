@@ -19,6 +19,9 @@ import (
 )
 
 var errStreamEndedBeforeVisibleOutput = errors.New("stream ended before first visible output")
+var errStreamEndedWithoutSSEEvents = errors.New("stream ended without any SSE events")
+var errStreamEndedAfterKeepAliveOnly = errors.New("stream ended after keepalive frames only")
+var errStreamEndedWithoutMeaningfulOutput = errors.New("stream ended without any meaningful SSE output")
 
 type streamRelayResult struct {
 	Committed           bool
@@ -26,6 +29,17 @@ type streamRelayResult struct {
 	Err                 error
 	LogicalIssue        error
 	FirstVisibleLatency time.Duration
+}
+
+type streamSemanticPolicy struct {
+	StrictGeminiEmptyResponse bool
+}
+
+type streamObservation struct {
+	sawEvent          bool
+	sawNonKeepAlive   bool
+	sawMeaningful     bool
+	sawPendingPayload bool
 }
 
 type logicalResponseIssue struct {
@@ -132,6 +146,16 @@ func (ps *ProxyServer) handleStreamingResponse(
 	startGuard *streamStartGuard,
 	attemptStart time.Time,
 ) streamRelayResult {
+	return ps.handleStreamingResponseWithPolicy(c, resp, startGuard, attemptStart, streamSemanticPolicy{})
+}
+
+func (ps *ProxyServer) handleStreamingResponseWithPolicy(
+	c *gin.Context,
+	resp *http.Response,
+	startGuard *streamStartGuard,
+	attemptStart time.Time,
+	semanticPolicy streamSemanticPolicy,
+) streamRelayResult {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		logrus.Error("Streaming unsupported by the writer, falling back to normal response")
@@ -145,7 +169,7 @@ func (ps *ProxyServer) handleStreamingResponse(
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") {
-		return ps.handleSSEStreamingResponse(c, resp, flusher, startGuard, attemptStart)
+		return ps.handleSSEStreamingResponse(c, resp, flusher, startGuard, attemptStart, semanticPolicy)
 	}
 
 	return ps.handleRawStreamingResponse(c, resp, flusher, startGuard, attemptStart)
@@ -157,33 +181,39 @@ func (ps *ProxyServer) handleSSEStreamingResponse(
 	flusher http.Flusher,
 	startGuard *streamStartGuard,
 	attemptStart time.Time,
+	semanticPolicy streamSemanticPolicy,
 ) streamRelayResult {
 	reader := bufio.NewReader(resp.Body)
 	var pending bytes.Buffer
 	committed := false
 	var firstVisibleLatency time.Duration
 	semanticTracker := newStreamSemanticTracker()
+	observation := streamObservation{}
 
 	for {
 		event, err := readSSEvent(reader)
 		if err != nil {
-			result := streamReadResult(committed, startGuard, err, firstVisibleLatency)
+			result := streamReadResult(committed, startGuard, err, firstVisibleLatency, observation)
 			if result.Err == nil {
-				result.LogicalIssue = semanticTracker.Finalize()
+				result.LogicalIssue = semanticTracker.Finalize(semanticPolicy)
 			}
 			return result
 		}
 
 		classification := classifySSEvent(event)
+		observation.sawEvent = true
 		semanticTracker.Observe(event)
 		if !committed {
 			if classification.keepAlive {
 				continue
 			}
+			observation.sawNonKeepAlive = true
 			if !classification.meaningful {
+				observation.sawPendingPayload = true
 				pending.Write(event.raw)
 				continue
 			}
+			observation.sawMeaningful = true
 
 			if startGuard != nil {
 				startGuard.Commit()
@@ -239,12 +269,16 @@ func (ps *ProxyServer) handleRawStreamingResponse(
 		}
 
 		if err != nil {
-			return streamReadResult(committed, startGuard, err, firstVisibleLatency)
+			return streamReadResult(committed, startGuard, err, firstVisibleLatency, streamObservation{
+				sawEvent:        committed,
+				sawNonKeepAlive: committed,
+				sawMeaningful:   committed,
+			})
 		}
 	}
 }
 
-func streamReadResult(committed bool, startGuard *streamStartGuard, err error, firstVisibleLatency time.Duration) streamRelayResult {
+func streamReadResult(committed bool, startGuard *streamStartGuard, err error, firstVisibleLatency time.Duration, observation streamObservation) streamRelayResult {
 	if err == nil {
 		return streamRelayResult{Committed: committed, FirstVisibleLatency: firstVisibleLatency}
 	}
@@ -259,7 +293,16 @@ func streamReadResult(committed bool, startGuard *streamStartGuard, err error, f
 				FirstVisibleLatency: firstVisibleLatency,
 			}
 		}
-		return streamRelayResult{Retryable: true, Err: errStreamEndedBeforeVisibleOutput, FirstVisibleLatency: firstVisibleLatency}
+		switch {
+		case !observation.sawEvent:
+			return streamRelayResult{Retryable: true, Err: errStreamEndedWithoutSSEEvents, FirstVisibleLatency: firstVisibleLatency}
+		case !observation.sawNonKeepAlive:
+			return streamRelayResult{Retryable: true, Err: errStreamEndedAfterKeepAliveOnly, FirstVisibleLatency: firstVisibleLatency}
+		case !observation.sawMeaningful && observation.sawPendingPayload:
+			return streamRelayResult{Retryable: true, Err: errStreamEndedWithoutMeaningfulOutput, FirstVisibleLatency: firstVisibleLatency}
+		default:
+			return streamRelayResult{Retryable: true, Err: errStreamEndedBeforeVisibleOutput, FirstVisibleLatency: firstVisibleLatency}
+		}
 	}
 	if !committed && startGuard != nil && startGuard.TimedOut() {
 		return streamRelayResult{
@@ -373,7 +416,7 @@ func classifySSEvent(event sseEvent) sseEventClassification {
 		return sseEventClassification{meaningful: true}
 	}
 
-	return sseEventClassification{}
+	return sseEventClassification{meaningful: true}
 }
 
 func payloadLooksLikeHeartbeat(payload string) bool {
@@ -477,7 +520,7 @@ func (t *streamSemanticTracker) Observe(event sseEvent) {
 	}
 }
 
-func (t *streamSemanticTracker) Finalize() error {
+func (t *streamSemanticTracker) Finalize(policy streamSemanticPolicy) error {
 	if t == nil {
 		return nil
 	}
@@ -489,6 +532,9 @@ func (t *streamSemanticTracker) Finalize() error {
 	}
 	if t.candidateIssue != nil {
 		return t.candidateIssue
+	}
+	if !policy.StrictGeminiEmptyResponse {
+		return nil
 	}
 	if !t.sawGemini {
 		return nil

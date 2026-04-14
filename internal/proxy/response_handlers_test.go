@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+var strictGeminiSemanticPolicy = streamSemanticPolicy{StrictGeminiEmptyResponse: true}
 
 func TestHandleStreamingResponseRetriesBeforeFirstVisibleOutput(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -57,6 +60,107 @@ func TestHandleStreamingResponseRetriesBeforeFirstVisibleOutput(t *testing.T) {
 	}
 }
 
+func TestHandleStreamingResponseMarksEmptySSEBodyExplicitly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+
+	go func() {
+		defer writer.Close()
+	}()
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: reader,
+	}
+
+	server := &ProxyServer{}
+	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
+
+	if !result.Retryable {
+		t.Fatal("expected empty SSE body to be retryable")
+	}
+	if !errors.Is(result.Err, errStreamEndedWithoutSSEEvents) {
+		t.Fatalf("expected empty SSE error, got %v", result.Err)
+	}
+}
+
+func TestHandleStreamingResponseAllowsMetadataOnlySSEInPermissiveMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+
+	go func() {
+		defer writer.Close()
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+	}()
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: reader,
+	}
+
+	server := &ProxyServer{}
+	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
+
+	if result.Err != nil {
+		t.Fatalf("expected metadata-only SSE to be treated as success, got %v", result.Err)
+	}
+	if !result.Committed {
+		t.Fatal("expected metadata-only SSE to commit in permissive mode")
+	}
+	if result.LogicalIssue != nil {
+		t.Fatalf("expected metadata-only SSE to avoid logical failure in permissive mode, got %v", result.LogicalIssue)
+	}
+}
+
+func TestHandleStreamingResponseMarksKeepAliveOnlySSEExplicitly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+
+	go func() {
+		defer writer.Close()
+		_, _ = writer.Write([]byte(": ping\n\n"))
+	}()
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: reader,
+	}
+
+	server := &ProxyServer{}
+	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
+
+	if !result.Retryable {
+		t.Fatal("expected keepalive-only SSE to be retryable")
+	}
+	if !errors.Is(result.Err, errStreamEndedAfterKeepAliveOnly) {
+		t.Fatalf("expected keepalive-only SSE error, got %v", result.Err)
+	}
+}
+
 func TestHandleStreamingResponseCommitsOnGeminiThoughtEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -81,7 +185,7 @@ func TestHandleStreamingResponseCommitsOnGeminiThoughtEvent(t *testing.T) {
 	}
 
 	server := &ProxyServer{}
-	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
+	result := server.handleStreamingResponseWithPolicy(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now(), strictGeminiSemanticPolicy)
 
 	if result.Err != nil {
 		t.Fatalf("expected successful relay, got %v", result.Err)
@@ -104,6 +208,42 @@ func TestHandleStreamingResponseCommitsOnGeminiThoughtEvent(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("expected text/event-stream content type, got %q", got)
+	}
+}
+
+func TestHandleStreamingResponseAllowsGeminiEmptyCandidateInPermissiveMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+
+	go func() {
+		defer writer.Close()
+		_, _ = writer.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}]}\n\n"))
+	}()
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: reader,
+	}
+
+	server := &ProxyServer{}
+	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
+
+	if result.Err != nil {
+		t.Fatalf("expected permissive gemini empty candidate to succeed, got %v", result.Err)
+	}
+	if !result.Committed {
+		t.Fatal("expected empty candidate frame to commit in permissive mode")
+	}
+	if result.LogicalIssue != nil {
+		t.Fatalf("expected permissive gemini empty candidate to avoid logical failure, got %v", result.LogicalIssue)
 	}
 }
 
@@ -130,7 +270,7 @@ func TestHandleStreamingResponseTreatsGeminiPromptBlockAsLogicalFailure(t *testi
 	}
 
 	server := &ProxyServer{}
-	result := server.handleStreamingResponse(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now())
+	result := server.handleStreamingResponseWithPolicy(c, resp, newStreamStartGuard(time.Second, func() {}), time.Now(), strictGeminiSemanticPolicy)
 
 	if result.Err != nil {
 		t.Fatalf("expected successful relay, got %v", result.Err)
