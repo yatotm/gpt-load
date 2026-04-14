@@ -260,6 +260,10 @@ func (s *CronChecker) probeGroupKeys(group *models.Group) {
 	inIdlePeriod := utils.IsWithinDailyTimeRanges(now, idleRanges)
 
 	for i := range keys {
+		if keys[i].Status == models.KeyStatusDisabled {
+			continue
+		}
+
 		effectiveConfig := s.SettingsManager.GetEffectiveKeyConfig(group.Config, keys[i].Config)
 		if !shouldUseActiveProbeForKey(inIdlePeriod, keys[i].Config, effectiveConfig) {
 			continue
@@ -473,6 +477,17 @@ func decideProbeStatusChange(stats probeWindowStats, isValid bool, failureRateLi
 	return probeDecision{
 		ShouldBlacklist: stats.FailureRate > failureRateLimit,
 		ShouldRestore:   isValid && stats.FailureRate <= failureRateLimit,
+	}
+}
+
+func DecideProbeStatusForDisplay(stats probeWindowStats, failureRateLimit float64) probeDecision {
+	if !stats.WindowComplete || stats.SampleCount == 0 {
+		return probeDecision{}
+	}
+
+	return probeDecision{
+		ShouldBlacklist: stats.FailureRate > failureRateLimit,
+		ShouldRestore:   stats.FailureRate <= failureRateLimit,
 	}
 }
 

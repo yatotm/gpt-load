@@ -24,7 +24,16 @@ type streamRelayResult struct {
 	Committed           bool
 	Retryable           bool
 	Err                 error
+	LogicalIssue        error
 	FirstVisibleLatency time.Duration
+}
+
+type logicalResponseIssue struct {
+	message string
+}
+
+func (e *logicalResponseIssue) Error() string {
+	return e.message
 }
 
 type streamStartGuard struct {
@@ -153,14 +162,20 @@ func (ps *ProxyServer) handleSSEStreamingResponse(
 	var pending bytes.Buffer
 	committed := false
 	var firstVisibleLatency time.Duration
+	semanticTracker := newStreamSemanticTracker()
 
 	for {
 		event, err := readSSEvent(reader)
 		if err != nil {
-			return streamReadResult(committed, startGuard, err, firstVisibleLatency)
+			result := streamReadResult(committed, startGuard, err, firstVisibleLatency)
+			if result.Err == nil {
+				result.LogicalIssue = semanticTracker.Finalize()
+			}
+			return result
 		}
 
 		classification := classifySSEvent(event)
+		semanticTracker.Observe(event)
 		if !committed {
 			if classification.keepAlive {
 				continue
@@ -354,8 +369,11 @@ func classifySSEvent(event sseEvent) sseEventClassification {
 	if payloadHasVisibleOutput(data) {
 		return sseEventClassification{meaningful: true}
 	}
+	if payloadHasTerminalIssue(data) {
+		return sseEventClassification{meaningful: true}
+	}
 
-	return sseEventClassification{meaningful: true}
+	return sseEventClassification{}
 }
 
 func payloadLooksLikeHeartbeat(payload string) bool {
@@ -393,6 +411,269 @@ func payloadHasVisibleOutput(payload string) bool {
 		hasAnthropicVisibleOutput(decoded)
 }
 
+func payloadHasTerminalIssue(payload string) bool {
+	var decoded any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		return false
+	}
+
+	if extractStructuredPayloadError(decoded) != nil {
+		return true
+	}
+
+	inspection := inspectGeminiPayload(decoded)
+	return inspection.PromptBlockIssue != nil || inspection.CandidateIssue != nil
+}
+
+type streamSemanticTracker struct {
+	sawGemini             bool
+	sawGeminiCandidates   bool
+	sawGeminiUsefulOutput bool
+	structuredIssue       error
+	promptBlockIssue      error
+	candidateIssue        error
+}
+
+func newStreamSemanticTracker() *streamSemanticTracker {
+	return &streamSemanticTracker{}
+}
+
+func (t *streamSemanticTracker) Observe(event sseEvent) {
+	if t == nil {
+		return
+	}
+
+	data := strings.TrimSpace(event.data)
+	if data == "" || data == "[DONE]" {
+		return
+	}
+
+	var decoded any
+	if err := json.Unmarshal([]byte(data), &decoded); err != nil {
+		return
+	}
+
+	if issue := extractStructuredPayloadError(decoded); issue != nil && t.structuredIssue == nil {
+		t.structuredIssue = issue
+	}
+
+	inspection := inspectGeminiPayload(decoded)
+	if !inspection.Recognized {
+		return
+	}
+
+	t.sawGemini = true
+	if inspection.HasCandidates {
+		t.sawGeminiCandidates = true
+	}
+	if inspection.HasUsefulOutput {
+		t.sawGeminiUsefulOutput = true
+	}
+	if inspection.PromptBlockIssue != nil && t.promptBlockIssue == nil {
+		t.promptBlockIssue = inspection.PromptBlockIssue
+	}
+	if inspection.CandidateIssue != nil && t.candidateIssue == nil {
+		t.candidateIssue = inspection.CandidateIssue
+	}
+}
+
+func (t *streamSemanticTracker) Finalize() error {
+	if t == nil {
+		return nil
+	}
+	if t.structuredIssue != nil {
+		return t.structuredIssue
+	}
+	if t.promptBlockIssue != nil {
+		return t.promptBlockIssue
+	}
+	if t.candidateIssue != nil {
+		return t.candidateIssue
+	}
+	if !t.sawGemini {
+		return nil
+	}
+	if !t.sawGeminiCandidates {
+		return &logicalResponseIssue{message: "gemini returned no candidates"}
+	}
+	if !t.sawGeminiUsefulOutput {
+		return &logicalResponseIssue{message: "gemini returned no usable content"}
+	}
+	return nil
+}
+
+type geminiPayloadInspection struct {
+	Recognized       bool
+	HasCandidates    bool
+	HasUsefulOutput  bool
+	PromptBlockIssue error
+	CandidateIssue   error
+}
+
+func inspectGeminiPayload(value any) geminiPayloadInspection {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return geminiPayloadInspection{}
+	}
+
+	inspection := geminiPayloadInspection{
+		Recognized: hasAnyMapKey(root, "candidates", "promptFeedback", "usageMetadata", "modelVersion", "responseId", "modelStatus"),
+	}
+	if !inspection.Recognized {
+		return inspection
+	}
+
+	if promptFeedback, ok := root["promptFeedback"].(map[string]any); ok {
+		blockReason := strings.ToUpper(strings.TrimSpace(asString(promptFeedback["blockReason"])))
+		if blockReason != "" && blockReason != "BLOCK_REASON_UNSPECIFIED" {
+			inspection.PromptBlockIssue = &logicalResponseIssue{
+				message: fmt.Sprintf("gemini prompt blocked: %s", blockReason),
+			}
+		}
+	}
+
+	candidates, ok := root["candidates"].([]any)
+	if !ok {
+		return inspection
+	}
+	inspection.HasCandidates = len(candidates) > 0
+
+	for _, candidate := range candidates {
+		candidateMap, ok := candidate.(map[string]any)
+		if !ok {
+			continue
+		}
+		if geminiCandidateHasUsefulOutput(candidateMap) {
+			inspection.HasUsefulOutput = true
+		}
+
+		finishReason := strings.ToUpper(strings.TrimSpace(asString(candidateMap["finishReason"])))
+		if !geminiFinishReasonIsFailure(finishReason) || inspection.CandidateIssue != nil {
+			continue
+		}
+
+		message := fmt.Sprintf("gemini candidate finished with %s", finishReason)
+		if finishMessage := strings.TrimSpace(asString(candidateMap["finishMessage"])); finishMessage != "" {
+			message += ": " + finishMessage
+		}
+		inspection.CandidateIssue = &logicalResponseIssue{message: message}
+	}
+
+	return inspection
+}
+
+func extractStructuredPayloadError(value any) error {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	rawError, exists := root["error"]
+	if !exists {
+		return nil
+	}
+
+	switch typed := rawError.(type) {
+	case string:
+		if msg := strings.TrimSpace(typed); msg != "" {
+			return &logicalResponseIssue{message: msg}
+		}
+	case map[string]any:
+		if msg := strings.TrimSpace(asString(typed["message"])); msg != "" {
+			return &logicalResponseIssue{message: msg}
+		}
+		if status := strings.TrimSpace(asString(typed["status"])); status != "" {
+			return &logicalResponseIssue{message: status}
+		}
+		if code := strings.TrimSpace(asString(typed["code"])); code != "" {
+			return &logicalResponseIssue{message: code}
+		}
+	default:
+		if marshaled, err := json.Marshal(typed); err == nil {
+			if msg := strings.TrimSpace(string(marshaled)); msg != "" {
+				return &logicalResponseIssue{message: msg}
+			}
+		}
+	}
+
+	return nil
+}
+
+func geminiCandidateHasUsefulOutput(candidate map[string]any) bool {
+	content, ok := candidate["content"].(map[string]any)
+	if !ok {
+		return false
+	}
+
+	parts, ok := content["parts"].([]any)
+	if !ok {
+		return false
+	}
+
+	for _, part := range parts {
+		partMap, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		if text := strings.TrimSpace(asString(partMap["text"])); text != "" {
+			if thought, ok := partMap["thought"].(bool); !ok || !thought {
+				return true
+			}
+		}
+
+		for _, key := range []string{"functionCall", "functionResponse", "inlineData", "fileData", "executableCode", "codeExecutionResult"} {
+			if _, ok := partMap[key]; ok {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func geminiFinishReasonIsFailure(reason string) bool {
+	switch reason {
+	case "", "FINISH_REASON_UNSPECIFIED", "STOP", "MAX_TOKENS":
+		return false
+	case "SAFETY", "RECITATION", "LANGUAGE", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT",
+		"SPII", "MALFORMED_FUNCTION_CALL", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT",
+		"IMAGE_OTHER", "NO_IMAGE", "IMAGE_RECITATION", "UNEXPECTED_TOOL_CALL",
+		"TOO_MANY_TOOL_CALLS", "MISSING_THOUGHT_SIGNATURE", "MALFORMED_RESPONSE":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasAnyMapKey(values map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := values[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func asString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	case json.Number:
+		return typed.String()
+	case float64:
+		return fmt.Sprintf("%.0f", typed)
+	case int:
+		return fmt.Sprintf("%d", typed)
+	case int64:
+		return fmt.Sprintf("%d", typed)
+	default:
+		return ""
+	}
+}
+
 func hasGeminiVisibleOutput(value any) bool {
 	root, ok := value.(map[string]any)
 	if !ok {
@@ -413,7 +694,7 @@ func hasGeminiVisibleOutput(value any) bool {
 		if !ok {
 			continue
 		}
-		if partsHaveVisibleText(content["parts"]) {
+		if partsHaveVisibleText(content["parts"]) || partsHaveStructuredOutput(content["parts"]) {
 			return true
 		}
 	}
@@ -438,12 +719,14 @@ func hasOpenAIVisibleOutput(value any) bool {
 			continue
 		}
 		if deltaMap, ok := choiceMap["delta"].(map[string]any); ok {
-			if stringFieldsHaveVisibleText(deltaMap, "content", "reasoning_content", "reasoning", "text") {
+			if stringFieldsHaveVisibleText(deltaMap, "content", "reasoning_content", "reasoning", "text") ||
+				openAIMessageHasStructuredOutput(deltaMap) {
 				return true
 			}
 		}
 		if messageMap, ok := choiceMap["message"].(map[string]any); ok {
-			if stringFieldsHaveVisibleText(messageMap, "content", "reasoning_content", "reasoning", "text") {
+			if stringFieldsHaveVisibleText(messageMap, "content", "reasoning_content", "reasoning", "text") ||
+				openAIMessageHasStructuredOutput(messageMap) {
 				return true
 			}
 		}
@@ -467,7 +750,37 @@ func hasOpenAIResponsesVisibleOutput(value any) bool {
 		}
 	}
 
-	return stringFieldsHaveVisibleText(root, "output_text", "reasoning", "reasoning_content")
+	if stringFieldsHaveVisibleText(root, "output_text", "reasoning", "reasoning_content") {
+		return true
+	}
+
+	eventType := strings.ToLower(strings.TrimSpace(asString(root["type"])))
+	if strings.Contains(eventType, "function_call") ||
+		strings.Contains(eventType, "custom_tool_call") ||
+		strings.Contains(eventType, "mcp_call") ||
+		strings.Contains(eventType, "web_search_call") ||
+		strings.Contains(eventType, "file_search_call") ||
+		strings.Contains(eventType, "computer_call") {
+		return true
+	}
+
+	if item, ok := root["item"].(map[string]any); ok && responseItemHasStructuredOutput(item) {
+		return true
+	}
+
+	output, ok := root["output"].([]any)
+	if !ok {
+		return false
+	}
+
+	for _, item := range output {
+		itemMap, ok := item.(map[string]any)
+		if ok && responseItemHasStructuredOutput(itemMap) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func hasAnthropicVisibleOutput(value any) bool {
@@ -477,12 +790,12 @@ func hasAnthropicVisibleOutput(value any) bool {
 	}
 
 	if deltaMap, ok := root["delta"].(map[string]any); ok {
-		if stringFieldsHaveVisibleText(deltaMap, "text", "thinking") {
+		if stringFieldsHaveVisibleText(deltaMap, "text", "thinking") || anthropicDeltaHasStructuredOutput(deltaMap) {
 			return true
 		}
 	}
 	if blockMap, ok := root["content_block"].(map[string]any); ok {
-		if stringFieldsHaveVisibleText(blockMap, "text", "thinking") {
+		if stringFieldsHaveVisibleText(blockMap, "text", "thinking") || anthropicContentBlockHasStructuredOutput(blockMap) {
 			return true
 		}
 	}
@@ -507,6 +820,59 @@ func partsHaveVisibleText(value any) bool {
 	}
 
 	return false
+}
+
+func partsHaveStructuredOutput(value any) bool {
+	parts, ok := value.([]any)
+	if !ok {
+		return false
+	}
+
+	for _, part := range parts {
+		partMap, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"functionCall", "functionResponse", "inlineData", "fileData", "executableCode", "codeExecutionResult"} {
+			if _, ok := partMap[key]; ok {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func openAIMessageHasStructuredOutput(values map[string]any) bool {
+	if _, ok := values["function_call"]; ok {
+		return true
+	}
+
+	toolCalls, ok := values["tool_calls"].([]any)
+	return ok && len(toolCalls) > 0
+}
+
+func responseItemHasStructuredOutput(item map[string]any) bool {
+	itemType := strings.ToLower(strings.TrimSpace(asString(item["type"])))
+	return strings.Contains(itemType, "function_call") ||
+		strings.Contains(itemType, "custom_tool_call") ||
+		strings.Contains(itemType, "mcp_call") ||
+		strings.Contains(itemType, "web_search_call") ||
+		strings.Contains(itemType, "file_search_call") ||
+		strings.Contains(itemType, "computer_call")
+}
+
+func anthropicDeltaHasStructuredOutput(delta map[string]any) bool {
+	deltaType := strings.ToLower(strings.TrimSpace(asString(delta["type"])))
+	if deltaType == "input_json_delta" {
+		return strings.TrimSpace(asString(delta["partial_json"])) != ""
+	}
+	return false
+}
+
+func anthropicContentBlockHasStructuredOutput(block map[string]any) bool {
+	blockType := strings.ToLower(strings.TrimSpace(asString(block["type"])))
+	return blockType == "tool_use" || blockType == "server_tool_use"
 }
 
 func stringFieldsHaveVisibleText(values map[string]any, keys ...string) bool {

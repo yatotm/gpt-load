@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	app_errors "gpt-load/internal/errors"
+	"gpt-load/internal/keypool"
 	"gpt-load/internal/models"
 	"gpt-load/internal/response"
 	"gpt-load/internal/services"
@@ -71,6 +72,31 @@ func validateKeysText(c *gin.Context, keysText string) bool {
 	}
 
 	return true
+}
+
+func isAllowedKeyListStatusFilter(status string) bool {
+	switch status {
+	case "", models.KeyStatusActive, models.KeyStatusInvalid, models.KeyStatusPaused, models.KeyStatusDisabled:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) fillKeyProbeDisplayState(group *models.Group, key *models.APIKey) {
+	if group == nil || key == nil || key.Status != models.KeyStatusPaused || s.SettingsManager == nil || s.KeyProvider == nil {
+		return
+	}
+
+	effectiveConfig := s.SettingsManager.GetEffectiveKeyConfig(group.Config, key.Config)
+	stats, err := s.KeyProvider.GetProbeWindowStats(key.ID, effectiveConfig.ActiveProbeWindowMinutes, time.Now())
+	if err != nil {
+		logrus.WithError(err).WithField("key_id", key.ID).Warn("Failed to load probe window state for paused key")
+		return
+	}
+
+	decision := keypool.DecideProbeStatusForDisplay(stats, float64(effectiveConfig.ActiveProbeFailureRateLimit))
+	key.ProbeOverLimit = decision.ShouldBlacklist
 }
 
 // findGroupByID is a helper function to find a group by its ID.
@@ -251,12 +277,13 @@ func (s *Server) ListKeysInGroup(c *gin.Context) {
 		return
 	}
 
-	if _, ok := s.findGroupByID(c, groupID); !ok {
+	group, ok := s.findGroupByID(c, groupID)
+	if !ok {
 		return
 	}
 
 	statusFilter := c.Query("status")
-	if statusFilter != "" && statusFilter != models.KeyStatusActive && statusFilter != models.KeyStatusInvalid {
+	if !isAllowedKeyListStatusFilter(statusFilter) {
 		response.ErrorI18nFromAPIError(c, app_errors.ErrValidation, "validation.invalid_status_filter")
 		return
 	}
@@ -288,6 +315,7 @@ func (s *Server) ListKeysInGroup(c *gin.Context) {
 		} else {
 			keys[i].KeyValue = decryptedValue
 		}
+		s.fillKeyProbeDisplayState(group, &keys[i])
 	}
 	paginatedResult.Items = keys
 
@@ -535,7 +563,7 @@ func (s *Server) ExportKeys(c *gin.Context) {
 	}
 
 	switch statusFilter {
-	case "all", models.KeyStatusActive, models.KeyStatusInvalid:
+	case "all", models.KeyStatusActive, models.KeyStatusInvalid, models.KeyStatusPaused, models.KeyStatusDisabled:
 	default:
 		response.ErrorI18nFromAPIError(c, app_errors.ErrValidation, "validation.invalid_status_filter")
 		return
@@ -567,6 +595,7 @@ type UpdateKeyPriorityRequest struct {
 type UpdateKeyRequest struct {
 	Notes               *string        `json:"notes"`
 	Priority            *int           `json:"priority"`
+	Status              *string        `json:"status"`
 	Config              map[string]any `json:"config"`
 	ProbeParamOverrides map[string]any `json:"probe_param_overrides"`
 }
@@ -667,10 +696,15 @@ func (s *Server) UpdateKey(c *gin.Context) {
 		response.Error(c, app_errors.NewAPIError(app_errors.ErrValidation, "priority must be greater than 0"))
 		return
 	}
+	if req.Status != nil && !models.IsManuallySwitchableKeyStatus(*req.Status) {
+		response.ErrorI18nFromAPIError(c, app_errors.ErrValidation, "validation.invalid_status_value")
+		return
+	}
 
 	key, err := s.KeyService.UpdateKey(c.Request.Context(), uint(keyID), services.KeyUpdateParams{
 		Notes:               req.Notes,
 		Priority:            req.Priority,
+		Status:              req.Status,
 		Config:              req.Config,
 		ProbeParamOverrides: req.ProbeParamOverrides,
 	})

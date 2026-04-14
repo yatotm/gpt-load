@@ -6,7 +6,7 @@ export interface ApiResponse<T> {
 }
 
 // 密钥状态
-export type KeyStatus = "active" | "invalid" | undefined;
+export type KeyStatus = "active" | "invalid" | "paused" | "disabled" | undefined;
 
 // 分组类型
 export type GroupType = "standard" | "aggregate";
@@ -34,6 +34,7 @@ export interface APIKey {
   last_probe_error?: string;
   probe_failure_rate: number;
   probe_sample_count: number;
+  probe_over_limit: boolean;
   created_at: string;
   updated_at: string;
 }

@@ -61,7 +61,7 @@ const props = defineProps<Props>();
 const keys = ref<KeyRow[]>([]);
 const loading = ref(false);
 const searchText = ref("");
-const statusFilter = ref<"all" | "active" | "invalid">("all");
+const statusFilter = ref<"all" | "active" | "invalid" | "paused" | "disabled">("all");
 const currentPage = ref(1);
 const pageSize = ref(12);
 const total = ref(0);
@@ -73,6 +73,8 @@ const statusOptions = [
   { label: t("common.all"), value: "all" },
   { label: t("keys.valid"), value: "active" },
   { label: t("keys.invalid"), value: "invalid" },
+  { label: t("keys.paused"), value: "paused" },
+  { label: t("keys.disabled"), value: "disabled" },
 ];
 
 const moreOptions = [
@@ -550,7 +552,11 @@ async function restoreKey(key: KeyRow) {
       d.loading = true;
 
       try {
-        await keysApi.restoreKeys(props.selectedGroup.id, key.key_value);
+        if (key.status === "invalid") {
+          await keysApi.restoreKeys(props.selectedGroup.id, key.key_value);
+        } else {
+          await keysApi.updateKey(key.id, { status: "active" });
+        }
         await loadKeys();
         triggerSyncOperationRefresh(props.selectedGroup.name, "RESTORE_SINGLE");
       } catch (_error) {
@@ -561,6 +567,66 @@ async function restoreKey(key: KeyRow) {
       }
     },
   });
+}
+
+async function updateKeyStatus(
+  key: KeyRow,
+  status: Exclude<KeyStatus, "invalid" | undefined>,
+  title: string,
+  content: string,
+  operationType: string
+) {
+  if (!props.selectedGroup?.id || !key.key_value) {
+    return;
+  }
+  const groupName = props.selectedGroup.name;
+
+  const d = dialog.warning({
+    title,
+    content,
+    positiveText: t("common.confirm"),
+    negativeText: t("common.cancel"),
+    onPositiveClick: async () => {
+      d.loading = true;
+      try {
+        await keysApi.updateKey(key.id, { status });
+        await loadKeys();
+        triggerSyncOperationRefresh(groupName, operationType);
+      } catch (error) {
+        console.error("Update key status failed", error);
+      } finally {
+        d.loading = false;
+      }
+    },
+  });
+}
+
+async function pauseKey(key: KeyRow) {
+  if (key.status === "paused") {
+    return;
+  }
+
+  await updateKeyStatus(
+    key,
+    "paused",
+    t("keys.pauseKey"),
+    t("keys.confirmPauseKey", { key: maskKey(key.key_value) }),
+    "PAUSE_SINGLE"
+  );
+}
+
+async function disableKey(key: KeyRow) {
+  if (key.status === "disabled") {
+    return;
+  }
+
+  await updateKeyStatus(
+    key,
+    "disabled",
+    t("keys.disableKey"),
+    t("keys.confirmDisableKey", { key: maskKey(key.key_value) }),
+    "DISABLE_SINGLE"
+  );
 }
 
 async function deleteKey(key: KeyRow) {
@@ -621,12 +687,46 @@ function formatRelativeTime(date: string) {
   return t("keys.justNow");
 }
 
-function getStatusClass(status: KeyStatus): string {
+function getStatusLabel(status: KeyStatus): string {
+  switch (status) {
+    case "active":
+      return t("keys.valid");
+    case "invalid":
+      return t("keys.invalid");
+    case "paused":
+      return t("keys.paused");
+    case "disabled":
+      return t("keys.disabled");
+    default:
+      return "--";
+  }
+}
+
+function getStatusDotClass(status: KeyStatus): string {
   switch (status) {
     case "active":
       return "status-valid";
     case "invalid":
       return "status-invalid";
+    case "paused":
+      return "status-paused";
+    case "disabled":
+      return "status-disabled";
+    default:
+      return "status-unknown";
+  }
+}
+
+function getCardStatusClass(key: KeyRow): string {
+  switch (key.status) {
+    case "active":
+      return "status-valid";
+    case "invalid":
+      return "status-invalid";
+    case "paused":
+      return key.probe_over_limit ? "status-paused-alert" : "status-paused";
+    case "disabled":
+      return "status-disabled";
     default:
       return "status-unknown";
   }
@@ -916,12 +1016,12 @@ function resetPage() {
             v-for="key in keys"
             :key="key.id"
             class="key-card"
-            :class="getStatusClass(key.status)"
+            :class="getCardStatusClass(key)"
           >
             <!-- Row 1: Status + Key + Note + Actions -->
             <div class="row-main">
               <span class="priority-num">{{ key.priority }}</span>
-              <span class="status-dot" :class="getStatusClass(key.status)" />
+              <span class="status-dot" :class="getStatusDotClass(key.status)" />
               <code class="key-mono" :title="key.key_value">{{ getKeyDisplayValue(key) }}</code>
               <span v-if="hasKeyOverrides(key)" class="override-tag">
                 {{ t("keys.overrideShort") }}
@@ -996,6 +1096,23 @@ function resetPage() {
                 @click="restoreKey(key)"
               >
                 {{ t("keys.restoreShort") }}
+              </n-button>
+              <n-button
+                tertiary
+                size="tiny"
+                type="warning"
+                :disabled="key.status === 'paused'"
+                @click="pauseKey(key)"
+              >
+                {{ t("keys.pauseShort") }}
+              </n-button>
+              <n-button
+                tertiary
+                size="tiny"
+                :disabled="key.status === 'disabled'"
+                @click="disableKey(key)"
+              >
+                {{ t("keys.disableShort") }}
               </n-button>
               <n-button tertiary size="tiny" type="error" @click="deleteKey(key)">
                 {{ t("common.deleteShort") }}
@@ -1078,8 +1195,8 @@ function resetPage() {
             <div class="editor-hero-label">{{ t("keys.keyFingerprint") }}</div>
             <div class="editor-hero-value">{{ maskKey(editingKey.key_value) }}</div>
             <div class="editor-hero-meta">
-              <span class="editor-hero-chip" :class="getStatusClass(editingKey.status)">
-                {{ editingKey.status === "active" ? t("keys.valid") : t("keys.invalid") }}
+              <span class="editor-hero-chip" :class="getStatusDotClass(editingKey.status)">
+                {{ getStatusLabel(editingKey.status) }}
               </span>
               <span class="editor-hero-chip neutral">
                 {{ t("keys.priority") }} {{ editingPriority || editingKey.priority }}
@@ -1366,6 +1483,21 @@ function resetPage() {
   opacity: 0.78;
 }
 
+.key-card.status-paused-alert {
+  border-color: rgba(208, 48, 80, 0.35);
+  background: rgba(208, 48, 80, 0.055);
+}
+
+.key-card.status-paused {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: var(--card-bg-solid);
+}
+
+.key-card.status-disabled {
+  border-color: rgba(100, 116, 139, 0.26);
+  background: rgba(148, 163, 184, 0.08);
+}
+
 /* Row 1 */
 .row-main {
   display: flex;
@@ -1403,6 +1535,14 @@ function resetPage() {
 
 .status-dot.status-invalid {
   background: #d03050;
+}
+
+.status-dot.status-paused {
+  background: #f59e0b;
+}
+
+.status-dot.status-disabled {
+  background: #64748b;
 }
 
 .key-mono {
@@ -1569,6 +1709,16 @@ function resetPage() {
 .editor-hero-chip.status-invalid {
   color: #b91c1c;
   background: rgba(220, 38, 38, 0.08);
+}
+
+.editor-hero-chip.status-paused {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.editor-hero-chip.status-disabled {
+  color: #475569;
+  background: rgba(148, 163, 184, 0.16);
 }
 
 .editor-hero-chip.neutral {

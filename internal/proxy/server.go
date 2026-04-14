@@ -332,6 +332,10 @@ func (ps *ProxyServer) executeRequestWithRetry(
 				return
 			}
 			logOptions.FirstVisibleLatencyMs = durationMillisPtr(streamResult.FirstVisibleLatency)
+			if streamResult.LogicalIssue != nil {
+				ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, streamResult.LogicalIssue, isStream, req.URL.String(), channelHandler, bodyBytes, models.RequestTypeFinal, logOptions)
+				return
+			}
 		} else {
 			ps.writeResponseHeaders(c, resp)
 			ps.handleNormalResponse(c, resp)

@@ -48,6 +48,7 @@ type ProbeStatusUpdate struct {
 type KeyMetaUpdate struct {
 	Notes               *string
 	Priority            *int
+	Status              *string
 	Config              *datatypes.JSONMap
 	ProbeParamOverrides *datatypes.JSONMap
 }
@@ -108,6 +109,84 @@ func (p *KeyProvider) clearFailureWindow(keyID uint) error {
 		return fmt.Errorf("failed to clear failure window for key %d: %w", keyID, err)
 	}
 	return nil
+}
+
+func (p *KeyProvider) loadProbeWindowState(keyID uint) (probeWindowState, error) {
+	raw, err := p.store.Get(probeWindowStoreKey(keyID))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return probeWindowState{}, nil
+		}
+		return probeWindowState{}, fmt.Errorf("failed to load probe window for key %d: %w", keyID, err)
+	}
+	if len(raw) == 0 {
+		return probeWindowState{}, nil
+	}
+
+	var state probeWindowState
+	if err := json.Unmarshal(raw, &state); err == nil {
+		if state.StartedAt == 0 {
+			state.StartedAt = earliestProbeTimestamp(state.Entries)
+		}
+		return state, nil
+	}
+
+	var legacyEntries []probeWindowEntry
+	if err := json.Unmarshal(raw, &legacyEntries); err == nil {
+		return probeWindowState{
+			StartedAt: earliestProbeTimestamp(legacyEntries),
+			Entries:   legacyEntries,
+		}, nil
+	}
+
+	return probeWindowState{}, fmt.Errorf("failed to unmarshal probe window for key %d", keyID)
+}
+
+func pruneProbeWindowEntries(entries []probeWindowEntry, cutoff int64) []probeWindowEntry {
+	filtered := make([]probeWindowEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Timestamp < cutoff {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func (p *KeyProvider) GetProbeWindowStats(keyID uint, windowMinutes int, now time.Time) (probeWindowStats, error) {
+	if windowMinutes <= 0 {
+		return probeWindowStats{}, nil
+	}
+
+	state, err := p.loadProbeWindowState(keyID)
+	if err != nil {
+		return probeWindowStats{}, err
+	}
+
+	filtered := pruneProbeWindowEntries(state.Entries, now.Add(-time.Duration(windowMinutes)*time.Minute).Unix())
+	if state.StartedAt == 0 && len(filtered) > 0 {
+		state.StartedAt = earliestProbeTimestamp(filtered)
+	}
+
+	var failureCount int64
+	for _, entry := range filtered {
+		if !entry.Success {
+			failureCount++
+		}
+	}
+
+	stats := probeWindowStats{
+		SampleCount:  lenAsInt64(filtered),
+		FailureCount: failureCount,
+	}
+	if stats.SampleCount > 0 {
+		stats.FailureRate = float64(stats.FailureCount) * 100 / float64(stats.SampleCount)
+	}
+	if state.StartedAt > 0 {
+		stats.WindowComplete = now.Unix()-state.StartedAt >= int64(windowMinutes*60)
+	}
+
+	return stats, nil
 }
 
 func (p *KeyProvider) addActiveKeyToLists(groupID, keyID uint, priority int) error {
@@ -400,7 +479,9 @@ func (p *KeyProvider) UpdateKeyPriority(keyID uint, priority int) (*models.APIKe
 func (p *KeyProvider) UpdateKeyMeta(keyID uint, update KeyMetaUpdate) (*models.APIKey, error) {
 	var key models.APIKey
 	var oldPriority int
+	var oldStatus string
 	var priorityChanged bool
+	var statusChanged bool
 
 	err := p.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&key, keyID).Error; err != nil {
@@ -408,6 +489,7 @@ func (p *KeyProvider) UpdateKeyMeta(keyID uint, update KeyMetaUpdate) (*models.A
 		}
 
 		oldPriority = normalizePriority(key.Priority)
+		oldStatus = key.Status
 		updates := make(map[string]any)
 
 		if update.Notes != nil {
@@ -419,6 +501,11 @@ func (p *KeyProvider) UpdateKeyMeta(keyID uint, update KeyMetaUpdate) (*models.A
 			updates["priority"] = nextPriority
 			key.Priority = nextPriority
 			priorityChanged = oldPriority != nextPriority
+		}
+		if update.Status != nil && *update.Status != key.Status {
+			updates["status"] = *update.Status
+			key.Status = *update.Status
+			statusChanged = true
 		}
 		if update.Config != nil {
 			updates["config"] = *update.Config
@@ -442,24 +529,40 @@ func (p *KeyProvider) UpdateKeyMeta(keyID uint, update KeyMetaUpdate) (*models.A
 		return nil, err
 	}
 
-	if update.Priority != nil {
-		storeUpdates := map[string]any{"priority": normalizePriority(*update.Priority)}
+	if update.Priority != nil || statusChanged {
+		storeUpdates := map[string]any{}
+		if update.Priority != nil {
+			storeUpdates["priority"] = normalizePriority(*update.Priority)
+		}
+		if statusChanged {
+			storeUpdates["status"] = key.Status
+		}
 		if err := p.store.HSet(fmt.Sprintf("key:%d", key.ID), storeUpdates); err != nil {
-			return nil, fmt.Errorf("failed to update key priority in store: %w", err)
+			return nil, fmt.Errorf("failed to update key metadata in store: %w", err)
 		}
+	}
 
-		if key.Status == models.KeyStatusActive && priorityChanged {
-			if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, oldPriority), 0, key.ID); err != nil {
-				return nil, fmt.Errorf("failed to remove key from old priority list: %w", err)
-			}
-			if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, key.Priority), 0, key.ID); err != nil {
-				return nil, fmt.Errorf("failed to prepare new priority list: %w", err)
-			}
-			if err := p.store.LPush(activeKeysPriorityListKey(key.GroupID, key.Priority), key.ID); err != nil {
-				return nil, fmt.Errorf("failed to push key into new priority list: %w", err)
-			}
+	if oldStatus == models.KeyStatusActive && key.Status != models.KeyStatusActive {
+		if err := p.removeActiveKeyFromLists(key.GroupID, key.ID, oldPriority); err != nil {
+			return nil, fmt.Errorf("failed to remove key from active lists: %w", err)
 		}
+	} else if oldStatus != models.KeyStatusActive && key.Status == models.KeyStatusActive {
+		if err := p.addActiveKeyToLists(key.GroupID, key.ID, key.Priority); err != nil {
+			return nil, fmt.Errorf("failed to add key back to active lists: %w", err)
+		}
+	} else if key.Status == models.KeyStatusActive && priorityChanged {
+		if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, oldPriority), 0, key.ID); err != nil {
+			return nil, fmt.Errorf("failed to remove key from old priority list: %w", err)
+		}
+		if err := p.store.LRem(activeKeysPriorityListKey(key.GroupID, key.Priority), 0, key.ID); err != nil {
+			return nil, fmt.Errorf("failed to prepare new priority list: %w", err)
+		}
+		if err := p.store.LPush(activeKeysPriorityListKey(key.GroupID, key.Priority), key.ID); err != nil {
+			return nil, fmt.Errorf("failed to push key into new priority list: %w", err)
+		}
+	}
 
+	if update.Priority != nil {
 		if err := p.syncGroupPriorityOrder(key.GroupID); err != nil {
 			return nil, err
 		}
@@ -495,7 +598,7 @@ func (p *KeyProvider) UpdateProbeStatus(apiKey *models.APIKey, update ProbeStatu
 			"probe_sample_count":     update.SampleCount,
 		}
 
-		if shouldRestore && key.Status != models.KeyStatusActive {
+		if shouldRestore && key.Status == models.KeyStatusInvalid {
 			updates["status"] = models.KeyStatusActive
 			updates["failure_count"] = 0
 			restoreToActive = true
@@ -580,9 +683,14 @@ func (p *KeyProvider) handleSuccess(keyID uint, keyHashKey string) error {
 		return fmt.Errorf("failed to get key details from store: %w", err)
 	}
 
+	currentStatus := keyDetails["status"]
+	if models.IsUserManagedKeyStatus(currentStatus) {
+		return nil
+	}
+
 	failureCount := parseFailureCount(keyDetails["failure_count"])
 	consecutiveFailureCount := parseConsecutiveFailureCount(keyDetails["consecutive_failure_count"])
-	isActive := keyDetails["status"] == models.KeyStatusActive
+	isActive := currentStatus == models.KeyStatusActive
 	priority, _ := strconv.Atoi(keyDetails["priority"])
 	priority = normalizePriority(priority)
 
@@ -696,7 +804,7 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 		return fmt.Errorf("failed to get key details from store: %w", err)
 	}
 
-	if keyDetails["status"] == models.KeyStatusInvalid {
+	if keyDetails["status"] == models.KeyStatusInvalid || models.IsUserManagedKeyStatus(keyDetails["status"]) {
 		return nil
 	}
 

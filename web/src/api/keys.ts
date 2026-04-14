@@ -156,6 +156,7 @@ export const keysApi = {
     payload: {
       notes?: string;
       priority?: number;
+      status?: KeyStatus;
       config?: Record<string, unknown>;
       probe_param_overrides?: Record<string, unknown>;
     }
@@ -252,7 +253,10 @@ export const keysApi = {
   },
 
   // 导出密钥
-  exportKeys(groupId: number, status: "all" | "active" | "invalid" = "all"): void {
+  exportKeys(
+    groupId: number,
+    status: "all" | "active" | "invalid" | "paused" | "disabled" = "all"
+  ): void {
     const authKey = localStorage.getItem("authKey");
     if (!authKey) {
       window.$message.error(i18n.global.t("auth.noAuthKeyFound"));

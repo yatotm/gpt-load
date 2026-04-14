@@ -9,9 +9,38 @@ import (
 
 // Key状态
 const (
-	KeyStatusActive  = "active"
-	KeyStatusInvalid = "invalid"
+	KeyStatusActive   = "active"
+	KeyStatusInvalid  = "invalid"
+	KeyStatusPaused   = "paused"
+	KeyStatusDisabled = "disabled"
 )
+
+func IsValidKeyStatus(status string) bool {
+	switch status {
+	case KeyStatusActive, KeyStatusInvalid, KeyStatusPaused, KeyStatusDisabled:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsManuallySwitchableKeyStatus(status string) bool {
+	switch status {
+	case KeyStatusActive, KeyStatusPaused, KeyStatusDisabled:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsUserManagedKeyStatus(status string) bool {
+	switch status {
+	case KeyStatusPaused, KeyStatusDisabled:
+		return true
+	default:
+		return false
+	}
+}
 
 const DefaultAPIKeyPriority = 100
 
@@ -158,6 +187,7 @@ type APIKey struct {
 	LastProbeError      string            `gorm:"type:text" json:"last_probe_error"`
 	ProbeFailureRate    float64           `gorm:"not null;default:0" json:"probe_failure_rate"`
 	ProbeSampleCount    int64             `gorm:"not null;default:0" json:"probe_sample_count"`
+	ProbeOverLimit      bool              `gorm:"-" json:"probe_over_limit"`
 	CreatedAt           time.Time         `json:"created_at"`
 	UpdatedAt           time.Time         `json:"updated_at"`
 }

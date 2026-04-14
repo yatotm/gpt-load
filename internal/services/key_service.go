@@ -76,6 +76,7 @@ func NewKeyService(db *gorm.DB, keyProvider *keypool.KeyProvider, keyValidator *
 type KeyUpdateParams struct {
 	Notes               *string
 	Priority            *int
+	Status              *string
 	Config              map[string]any
 	ProbeParamOverrides map[string]any
 }
@@ -100,6 +101,7 @@ func (s *KeyService) UpdateKey(_ context.Context, keyID uint, params KeyUpdatePa
 	update := keypool.KeyMetaUpdate{
 		Notes:    notes,
 		Priority: params.Priority,
+		Status:   params.Status,
 	}
 	if params.Config != nil {
 		configJSON := toJSONMap(cleanedConfig)
@@ -401,7 +403,7 @@ func (s *KeyService) StreamKeysToWriter(groupID uint, statusFilter string, write
 	query := s.DB.Model(&models.APIKey{}).Where("group_id = ?", groupID).Select("id, key_value")
 
 	switch statusFilter {
-	case models.KeyStatusActive, models.KeyStatusInvalid:
+	case models.KeyStatusActive, models.KeyStatusInvalid, models.KeyStatusPaused, models.KeyStatusDisabled:
 		query = query.Where("status = ?", statusFilter)
 	case "all":
 	default:
